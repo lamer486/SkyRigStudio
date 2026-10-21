@@ -3,6 +3,7 @@
 ## v0.73 — 2026-10-21
 - New HDRI Library layout: controls grouped by task (top bar: add, download, search, filter, sort, size, Library menu; groups on the left; actions for selected maps above the grid; inspector on the right)
 - ★ Favorites: star maps from the selection bar or the right-click menu; they appear in the pinned Favorites group
+- Horizon line switch in HDRI settings: shows the horizon in the camera of the current view (Corona Camera, Physical, Target/Free Camera)
 - Previews no longer disappear when an HDRI is moved, renamed, re-downloaded or touched by OneDrive/antivirus (preview name now comes from the file content)
 - Automatic backups of the library and previews (Documents\SkyRig Studio\Backups), Backup & Restore window, banner to restore missing previews
 - ☀ Detect sun... (selected / all maps): the sun position is found in advance, and the sun is aligned automatically when a map is applied

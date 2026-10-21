@@ -1851,6 +1851,51 @@ def ensure_icon(sun, size):
     return ic
 
 
+# ---------- линия горизонта в камере (v0.73) ----------
+# У всех камер Max есть своя линия горизонта в виде из камеры: у Corona Camera — showHorizonLine,
+# у Physical — horizon_on, у Target/Free Camera — showHorizon. Она рисуется поверх геометрии и сама идёт за камерой,
+# поэтому скрипт ничего не создаёт в сцене — только включает это свойство у камеры текущего вида.
+_HLINE_PROPS = ("showHorizonLine", "horizon_on", "showHorizon")
+
+
+def cam_hline_prop(cam):
+    if cam is None:
+        return None
+    for n in _HLINE_PROPS:
+        try:
+            if rt.isProperty(cam, n):
+                return n
+        except Exception:
+            pass
+    return None
+
+
+def get_cam_hline(cam):
+    """True/False — включена ли линия горизонта у камеры; None — у камеры такого свойства нет."""
+    n = cam_hline_prop(cam)
+    if n is None:
+        return None
+    try:
+        return bool(rt.getProperty(cam, n))
+    except Exception:
+        return None
+
+
+def set_cam_hline(cam, on):
+    n = cam_hline_prop(cam)
+    if n is None:
+        return False
+    rt.setProperty(cam, n, bool(on))
+    return True
+
+
+def view_camera():
+    try:
+        return rt.viewport.getCamera()
+    except Exception:
+        return None
+
+
 # ==========================================================================
 # 5. Виджеты
 # ==========================================================================
@@ -5633,6 +5678,7 @@ class SafeEnvironment(QtWidgets.QWidget):
     def _refresh_state(self):
         """Строка состояния: пресет (совпадает / изменён / не сохранён) и предупреждение о привязке."""
         self._update_compass()
+        self._sync_hline()                     # вид могли переключить на другую камеру
         if not hasattr(self, "lbl_state") or not hasattr(self, "lbl_link"):
             return
         try:
@@ -6039,6 +6085,12 @@ class SafeEnvironment(QtWidgets.QWidget):
         row_blur.addStretch(1)
         f.addRow("Blur", row_blur)
         f.addRow("Horizon", self.sp_horizon)
+        self.chk_hline = ToggleSwitch("Horizon line")
+        self.chk_hline.setToolTip("Shows the horizon line (eye level) in the camera of the current view — the camera's own "
+                                  "“Show Horizon” option, drawn over the geometry. With Horizon = 0 the HDRI horizon lies "
+                                  "exactly on this line.")
+        self.chk_hline.toggled.connect(self._on_hline)
+        f.addRow("", self.chk_hline)
         self.cmb_target = TargetCombo(self._refresh_target_label)
         self.cmb_target.addItem("Corona global settings", TARGET_RENDERER)
         self.cmb_target.addItem("Active CoronaCam", TARGET_CAMERA)
@@ -6762,6 +6814,38 @@ class SafeEnvironment(QtWidgets.QWidget):
             return
         self._refresh_state()
 
+    # ---------- линия горизонта ----------
+    def _on_hline(self, on):
+        if self._loading:
+            return
+        cam = view_camera()
+        if cam is None:
+            self._status("Activate a camera view first: the horizon line is shown in the camera of the current view.",
+                         error=True)
+            self._sync_hline()
+            return
+        if self._run("horizon line", lambda: set_cam_hline(cam, on)) is not True:
+            self._status("Camera “%s” has no horizon line option." % str(cam.name), error=True)
+            self._sync_hline()
+            return
+        hz = self.sp_horizon.value()
+        if on:
+            note = (" The HDRI horizon is shifted by %+.2f°, so the map horizon is %s this line." %
+                    (hz, "above" if hz * HORIZON_ELEV_SIGN > 0 else "below")) if abs(hz) > 0.01 else ""
+            self._status("Horizon line shown in camera “%s”.%s" % (str(cam.name), note))
+        else:
+            self._status("Horizon line hidden in camera “%s”." % str(cam.name))
+
+    def _sync_hline(self):
+        """Переключатель показывает состояние линии горизонта у камеры текущего вида."""
+        if not hasattr(self, "chk_hline"):
+            return
+        st = get_cam_hline(view_camera())
+        prev = self._loading
+        self._loading = True
+        self.chk_hline.setChecked(bool(st))
+        self._loading = prev
+
     @undoable("HDRI settings reset")
     def reset_hdri_settings(self):
         vals = dict(rotation=0.0, exposure=0.0, gamma=1.0, saturation=100.0, blur=BLUR_DEFAULT,
@@ -7388,6 +7472,7 @@ class SafeEnvironment(QtWidgets.QWidget):
         self._loading = True
         path = ""
         try:
+            self._sync_hline()
             cc, bm, other = get_chain()
             if bm is not None:
                 path = str(bm.filename)
