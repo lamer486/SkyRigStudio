@@ -6349,7 +6349,8 @@ class SafeEnvironment(QtWidgets.QWidget):
             i = (i + direction) % n
             if os.path.isfile(files[i]):
                 if self.apply_path(files[i]):
-                    self._status("%s  [%d/%d, group “%s”]" % (os.path.basename(files[i]), i + 1, n, group))
+                    self._status("%s  [%d/%d, group “%s”]%s" % (os.path.basename(files[i]), i + 1, n, group,
+                                                               getattr(self, "_sun_skip_note", "")))
                 return
         self._status("There are no available files in group “%s”." % group, error=True)
 
@@ -6643,9 +6644,11 @@ class SafeEnvironment(QtWidgets.QWidget):
             return False
         self.sync_from_scene()
         sun_note = ""
+        self._sun_skip_note = ""
         if find_sun() is not None:
             if self.chk_link.isChecked():
                 self._align_impl(create_if_missing=False, quiet=True)
+                sun_note = self._sun_skip_note
             elif getattr(self.lib, "sun_auto_align", True):
                 # солнце сразу по новой карте: положение берётся из кэша («Detect sun…» в библиотеке) или ищется
                 # один раз; карты без явного солнца (пасмурно, ночь) солнце не двигают
@@ -7078,6 +7081,22 @@ class SafeEnvironment(QtWidgets.QWidget):
             self._status("Could not read the HDRI.", error=True)
             return
         u, v, peak = pt
+        if peak < SUN_MIN_PEAK:
+            # Ночь, пасмурно, сумерки: самая яркая точка — фонарь или облако, а не солнце. Автоматически солнце
+            # не двигаем (смена карты, поворот при включённой привязке), а при нажатии кнопки — только по согласию.
+            light = self.lib.auto_light.get(path_key(path), "")
+            what = ("%s map" % light.lower()) if light else "this map"
+            if quiet:
+                self._sun_skip_note = " No distinct sun on %s: the sun was left where it is." % what
+                self._status(self._sun_skip_note.strip())
+                return
+            r = QtWidgets.QMessageBox.question(
+                self, "Link sun to HDRI",
+                "There is no distinct sun on %s: the brightest point is weak (peak %.1f) — it is probably a lamp or "
+                "a bright cloud.\n\nPlace the sun on this point anyway?" % (what, peak))
+            if r != QtWidgets.QMessageBox.Yes:
+                self._status("The sun was left where it is.")
+                return
         _cc, bm, _o = get_chain()
         rot = float(bm.uAngle) if bm is not None else 0.0
         az, el = hdri_pixel_to_direction(u, v, rot, bm_horizon(bm) if bm is not None else 0.0)
