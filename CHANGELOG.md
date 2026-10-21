@@ -1,5 +1,9 @@
 # История версий
 
+## v0.74 — 2026-10-21
+- Maps without a distinct sun (night, overcast, dusk) no longer move the sun when switched with Prev/Next or rotated with the link on; “link to HDRI” asks first
+- Horizon line switch in HDRI settings: shows the horizon in the camera of the current view (Corona Camera, Physical, Target/Free Camera)
+
 ## v0.73 — 2026-10-21
 - New HDRI Library layout: controls grouped by task (top bar: add, download, search, filter, sort, size, Library menu; groups on the left; actions for selected maps above the grid; inspector on the right)
 - ★ Favorites: star maps from the selection bar or the right-click menu; they appear in the pinned Favorites group
