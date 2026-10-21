@@ -10,7 +10,7 @@ if SRS_inst_guard == undefined or (timeStamp() - SRS_inst_guard) > 2000 do
 	local warn2 = ""
 	if ver < 27000 do warn1 = "! 3ds Max 2025 or newer is required (PySide6)."
 	if not hasCorona do warn2 = "! Corona Renderer not found: the script works with Corona only."
-	-- старая установка (SafeEnvironment) заменяется новой; данные пользователя в %APPDATA%\\SafeEnvironment не трогаются
+	-- старая установка (SafeEnvironment) заменяется новой; данные пользователя не трогаются (скрипт сам переносит их из %APPDATA%\\SafeEnvironment)
 	local legacy = ""
 	local oldDir = (getDir #userScripts) + "\\SafeEnvironment"
 	local oldMcr = (getDir #userMacros) + "\\SafeEnvironment-SafeEnvironment.mcr"
