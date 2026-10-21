@@ -1,9 +1,10 @@
 {
   "version": "0.73",
   "file": "releases/skyrig_studio_v0.73.py",
-  "sha256": "254ad12f4a305bafd8cc9bf6188ed989e6d71dd11f2f56f1f8fdc36753473202",
+  "sha256": "e0ad7bf0354d2e19144e149cfcee7ae7558266ca2a53389f9c6f8d4704d39ef8",
   "date": "2026-10-21",
   "notes": [
+    "Maps without a distinct sun (night, overcast, dusk) no longer move the sun when switched with Prev/Next or rotated with the link on; “link to HDRI” asks first",
     "New HDRI Library layout: controls grouped by task (top bar: add, download, search, filter, sort, size, Library menu; groups on the left; actions for selected maps above the grid; inspector on the right)",
     "★ Favorites: star maps from the selection bar or the right-click menu; they appear in the pinned Favorites group",
     "Horizon line switch in HDRI settings: shows the horizon in the camera of the current view (Corona Camera, Physical, Target/Free Camera)",
