@@ -56,7 +56,7 @@ Without the link the sun stays where you put it; you can click "link to HDRI" ag
 - Windows. Internet access is needed for updates and map downloads (the script itself works offline).
 
 ## Installation
-1. Download [`dist/SkyRigStudio_v0.72.mzp`](https://github.com/lamer486/SkyRigStudio/raw/main/dist/SkyRigStudio_v0.72.mzp).
+1. Download [`dist/SkyRigStudio_v0.73.mzp`](https://github.com/lamer486/SkyRigStudio/raw/main/dist/SkyRigStudio_v0.73.mzp).
 2. Drag the file into the 3ds Max window (any viewport). The installer copies the script and creates a macro.
 3. Put the button on a toolbar: **Customize → Customize User Interface → Toolbars** (or Menus / Quads) →
    category **SkyRig Studio** → drag "SkyRig Studio" onto a toolbar. Launch the script with that button.
@@ -78,8 +78,27 @@ In Max: **Customize → Customize User Interface → Toolbars**, category **SkyR
 | What | Where |
 |---|---|
 | Script | `%LOCALAPPDATA%\Autodesk\3dsMax\<version> - 64bit\ENU\scripts\SkyRigStudio\` |
-| Library, presets, cache, version backups | `%APPDATA%\SafeEnvironment\` |
+| Library, presets, sun cache, action log, script version backups | `%APPDATA%\SkyRigStudio\` |
+| Previews and site catalogs (cache, can be rebuilt) | `%LOCALAPPDATA%\SkyRigStudio\` |
+| Library and preview backups | `Documents\SkyRig Studio\Backups\` (can be changed in **Backup & Restore**) |
 | 3ds Max scene | the script writes nothing into it except the environment itself (Corona Color Correct → CoronaBitmap) and one Corona Sun |
+
+Versions before 0.73 kept everything in `%APPDATA%\SafeEnvironment\`. On the first start of v0.73 the data is copied
+to the new folders automatically; the old folder is left in place.
+
+**Backups.** The library and previews are backed up automatically after previews are created, after the library changes
+(at most every 10 minutes) and when the library window is closed. The last 10 backups are kept. If previews go missing,
+the library shows a banner with **Restore from backup**. HDRI files themselves are not copied into backups.
+
+**HDRI Library layout (v0.73).** Top bar: *+ Add*, *⬇ Download*, search, tag filter, sort, thumbnail size and the
+*Library* menu (backup, restore, save/load library file). Left: groups with *★ Favorites* pinned on top. Above the grid:
+actions for the selected maps (add to group, remove, ★ Favorites) — shown only while something is selected; right-click
+a map for the same actions. Right: inspector — the selected map (resolution, lighting, sun, brightness correction),
+exposure balance and previews.
+
+**Sun positions in advance.** **☀ Detect sun…** in the library (on selected or on all maps) finds the sun on each map once.
+When such a map is applied, the Corona Sun is aligned with it immediately (option *Align the sun with the HDRI when a map
+is applied*); maps without a distinct sun (overcast, night) leave the sun where it is. Found maps are marked with ☀.
 
 The library stores **full paths** to HDRIs, so on another computer it starts empty; to move it use the
 "Save library to file…" / "Load library from file…" buttons (the HDRI files themselves are not copied).
@@ -151,7 +170,7 @@ HDRI, находит самую яркую точку (солнце на кар�
 - Windows. Для обновлений и загрузки карт — доступ в интернет (сам скрипт работает и без него).
 
 ## Установка
-1. Скачайте [`dist/SkyRigStudio_v0.72.mzp`](https://github.com/lamer486/SkyRigStudio/raw/main/dist/SkyRigStudio_v0.72.mzp).
+1. Скачайте [`dist/SkyRigStudio_v0.73.mzp`](https://github.com/lamer486/SkyRigStudio/raw/main/dist/SkyRigStudio_v0.73.mzp).
 2. Перетащите файл мышью в окно 3ds Max (в любой вьюпорт). Установщик скопирует скрипт и создаст кнопку.
 3. Выведите кнопку на панель: **Customize → Customize User Interface → Toolbars** (или Menus / Quads) →
    категория **SkyRig Studio** → перетащите «SkyRig Studio» на панель. Запуск — по этой кнопке.

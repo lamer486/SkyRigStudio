@@ -52,7 +52,7 @@ import pymxs
 from PySide6 import QtWidgets, QtCore, QtGui
 import qtmax
 
-VERSION = "0.72"
+VERSION = "0.73"
 WINDOW_TITLE = "SkyRig Studio v" + VERSION
 COPYRIGHT_TEXT = "Script created with the help of Claude AI by Vasiliy Kanevskiy, 2026."
 CONTACT_EMAIL = "kanevskiy.vasiliy@gmail.com"
@@ -67,6 +67,7 @@ HDRI_EXTS = (".hdr", ".exr")
 BACKUP_FORMAT = "SafeEnvironmentLibrary"
 PRESETS_FORMAT = "SafeEnvironmentPresets"
 ALL_GROUP = "All files"              # виртуальная группа: объединение всех групп
+FAV_GROUP = "★ Favorites"            # виртуальная группа: избранные карты (v0.73)
 THUMB_W, THUMB_H = 256, 128
 PREVIEW_W, PREVIEW_H = 200, 100        # превью в главном окне (компактное)
 DOCK_WIDTH = 288                       # ширина док-панели (и минимальная: уже — кнопки уходят за край)
@@ -78,8 +79,17 @@ SUN_DIST_DEFAULT = 300.0              # метры
 SUN_DIST_MIN, SUN_DIST_MAX = 1, 5000  # метры (диапазон поля «Расстояние до цели»)
 SUN_MIN_PEAK = 20.0                   # ниже этой яркости «пик» вряд ли солнце
 
-DATA_DIR = os.path.join(os.environ.get("APPDATA") or os.path.expanduser("~"), "SafeEnvironment")
-THUMB_DIR = os.path.join(DATA_DIR, "thumbs")
+# Где что лежит (v0.73+):
+#   %APPDATA%\SkyRigStudio        — важные данные: библиотека, пресеты, кэш солнца, журнал, копии версий скрипта;
+#   %LOCALAPPDATA%\SkyRigStudio   — кэш, который можно пересоздать: превью, каталоги и миниатюры сайтов;
+#   Документы\SkyRig Studio\Backups — автобэкапы библиотеки и превью (папку можно сменить в Backup & Restore).
+# До v0.73 всё лежало в %APPDATA%\SafeEnvironment — при первом запуске данные переносятся (см. migrate_legacy_data).
+_APPDATA = os.environ.get("APPDATA") or os.path.expanduser("~")
+LEGACY_DATA_DIR = os.path.join(_APPDATA, "SafeEnvironment")
+DATA_DIR = os.path.join(_APPDATA, "SkyRigStudio")
+LOCAL_DIR = os.path.join(os.environ.get("LOCALAPPDATA") or _APPDATA, "SkyRigStudio")
+THUMB_DIR = os.path.join(LOCAL_DIR, "thumbs")
+THUMB_INDEX_FILE = os.path.join(LOCAL_DIR, "thumb_index.json")
 LIB_FILE = os.path.join(DATA_DIR, "library.json")
 PRESET_FILE = os.path.join(DATA_DIR, "presets.json")
 CACHE_FILE = os.path.join(DATA_DIR, "cache.json")
@@ -219,8 +229,88 @@ def file_signature(p):
         return "%s|0|0" % path_key(p)
 
 
-def thumb_name(p):
+# ---------- имя превью: по содержимому файла (v0.73) ----------
+# До v0.73 имя превью считалось от пути + даты изменения + размера. Стоило перенести/переименовать карту, заново
+# скачать её или дать OneDrive/антивирусу «тронуть» дату — и превью «пропадало» (файл оставался, но под старым именем).
+# Теперь имя = хэш размера и первых/последних 64 КБ файла: не зависит от пути, имени и даты. Чтобы не читать файл
+# при каждом обращении, найденное имя запоминается по подписи (путь|дата|размер) в thumb_index.json.
+THUMB_VER = "t5"
+_FP_CHUNK = 64 * 1024
+_THUMB_INDEX = None          # подпись -> имя превью (загружается при первом обращении)
+_THUMB_INDEX_DIRTY = False
+_LEGACY_CHECKED = set()      # имена, для которых уже проверили превью старого формата
+
+
+def _thumb_index():
+    global _THUMB_INDEX
+    if _THUMB_INDEX is None:
+        d = load_json(THUMB_INDEX_FILE, {})
+        _THUMB_INDEX = d.get("ids", {}) if isinstance(d, dict) and isinstance(d.get("ids"), dict) else {}
+    return _THUMB_INDEX
+
+
+def save_thumb_index():
+    """Записывает индекс имён превью, если он менялся. Вызывается после пакетных операций и при закрытии библиотеки."""
+    global _THUMB_INDEX_DIRTY
+    if not _THUMB_INDEX_DIRTY or _THUMB_INDEX is None:
+        return
+    idx = _THUMB_INDEX
+    if len(idx) > 20000:                                  # не растём бесконечно: старые подписи отбрасываются
+        for k in list(idx.keys())[:5000]:
+            idx.pop(k, None)
+    try:
+        save_json(THUMB_INDEX_FILE, {"version": 1, "ids": idx})
+        _THUMB_INDEX_DIRTY = False
+    except Exception:
+        pass
+
+
+def content_id(p):
+    """Имя превью по содержимому файла или None, если файл не читается."""
+    global _THUMB_INDEX_DIRTY
+    sig = file_signature(p)
+    idx = _thumb_index()
+    cid = idx.get(sig)
+    if cid:
+        return cid
+    try:
+        size = os.path.getsize(p)
+        h = hashlib.sha1(("%d|%s|" % (size, THUMB_VER)).encode("ascii"))
+        with open(p, "rb") as fh:
+            h.update(fh.read(_FP_CHUNK))
+            if size > 2 * _FP_CHUNK:
+                fh.seek(-_FP_CHUNK, os.SEEK_END)
+                h.update(fh.read(_FP_CHUNK))
+        cid = h.hexdigest()[:24]
+    except OSError:
+        return None
+    idx[sig] = cid
+    _THUMB_INDEX_DIRTY = True
+    return cid
+
+
+def legacy_thumb_name(p):
+    """Имя превью в версиях до v0.73 (путь + дата + размер) — только для переноса старого кэша."""
     return hashlib.sha1(("%s|t4" % file_signature(p)).encode("utf-8", "replace")).hexdigest()[:24]
+
+
+def thumb_name(p):
+    cid = content_id(p)
+    if not cid:                                   # файла нет: имя, под которым превью заведомо не найдётся
+        return "missing_" + hashlib.sha1(path_key(p).encode("utf-8", "replace")).hexdigest()[:16]
+    if cid not in _LEGACY_CHECKED:                # превью старого формата -> переименовываем, а не создаём заново
+        _LEGACY_CHECKED.add(cid)
+        new_lin = os.path.join(THUMB_DIR, cid + ".lin")
+        if not os.path.isfile(new_lin):
+            old_lin = os.path.join(THUMB_DIR, legacy_thumb_name(p) + ".lin")
+            if os.path.isfile(old_lin):
+                try:
+                    os.replace(old_lin, new_lin)
+                    for f in glob.glob(glob.escape(old_lin[:-4]) + "_e*.png"):
+                        os.replace(f, os.path.join(THUMB_DIR, cid + os.path.basename(f)[len(os.path.basename(old_lin)) - 4:]))
+                except OSError:
+                    pass
+    return cid
 
 
 def lin_path(p):
@@ -243,6 +333,55 @@ def delete_thumbs(p):
         except OSError:
             pass
     return n
+
+
+# ---------- перенос данных из %APPDATA%\SafeEnvironment (версии до v0.73) ----------
+_LEGACY_CACHE_ITEMS = ("thumbs", "acg_thumbs", "ph_thumbs", "acg_catalog.json", "ph_catalog.json")
+MIGRATION_MARK = os.path.join(DATA_DIR, "migrated_from_SafeEnvironment.txt")
+
+
+def migrate_legacy_data():
+    """Один раз: важные файлы копируются в %APPDATA%\\SkyRigStudio (старая папка остаётся — ей пользуется откат
+    на прошлую версию), кэш превью и каталогов переносится в %LOCALAPPDATA%\\SkyRigStudio. Ничего не выбрасывает."""
+    try:
+        if os.path.isfile(MIGRATION_MARK) or not os.path.isdir(LEGACY_DATA_DIR):
+            return
+        if os.path.isfile(os.path.join(DATA_DIR, "library.json")):          # новая папка уже используется
+            return
+        os.makedirs(DATA_DIR, exist_ok=True)
+        os.makedirs(LOCAL_DIR, exist_ok=True)
+        moved, copied = 0, 0
+        for name in os.listdir(LEGACY_DATA_DIR):
+            src = os.path.join(LEGACY_DATA_DIR, name)
+            if name in _LEGACY_CACHE_ITEMS:
+                dst = os.path.join(LOCAL_DIR, name)
+                if os.path.exists(dst):
+                    continue
+                try:
+                    shutil.move(src, dst)
+                    moved += 1
+                except Exception:
+                    pass
+            else:
+                dst = os.path.join(DATA_DIR, name)
+                if os.path.exists(dst):
+                    continue
+                try:
+                    if os.path.isdir(src):
+                        shutil.copytree(src, dst)
+                    else:
+                        shutil.copy2(src, dst)
+                    copied += 1
+                except Exception:
+                    pass
+        with open(MIGRATION_MARK, "w", encoding="utf-8") as fh:
+            fh.write("Data copied from %s on %s (copied: %d, cache moved: %d).\n"
+                     % (LEGACY_DATA_DIR, time.strftime("%Y-%m-%d %H:%M"), copied, moved))
+    except Exception:
+        pass
+
+
+migrate_legacy_data()
 
 
 def rot_to_slider(v):
@@ -324,6 +463,21 @@ class Library:
             self.thumb_ev = float(d.get("thumb_ev", 0.0)) if isinstance(d, dict) else 0.0
         except (TypeError, ValueError):
             self.thumb_ev = 0.0
+        dd = d if isinstance(d, dict) else {}
+        self.backup_auto = bool(dd.get("backup_auto", True))               # автобэкап (v0.73)
+        self.backup_dir = dd.get("backup_dir", "") if isinstance(dd.get("backup_dir", ""), str) else ""
+        try:
+            self.backup_keep = max(1, min(100, int(dd.get("backup_keep", BACKUP_KEEP_DEFAULT))))
+        except (TypeError, ValueError):
+            self.backup_keep = BACKUP_KEEP_DEFAULT
+        try:
+            self.backup_last = float(dd.get("backup_last", 0.0))
+        except (TypeError, ValueError):
+            self.backup_last = 0.0
+        self.backup_last_hash = dd.get("backup_last_hash", "") if isinstance(dd.get("backup_last_hash", ""), str) else ""
+        self.sun_auto_align = bool(dd.get("sun_auto_align", True))         # солнце по HDRI сразу при применении карты
+        fav = dd.get("favorites", [])
+        self.favorites = self._unique([norm_path(f) for f in fav if isinstance(f, str)]) if isinstance(fav, list) else []
 
     @staticmethod
     def _unique(paths):
@@ -346,7 +500,11 @@ class Library:
                               "ph_folder": self.ph_folder, "ph_res": self.ph_res, "ph_fmt": self.ph_fmt,
                               "update_auto": self.update_auto, "update_checked": self.update_checked,
                               "ui_simple": self.ui_simple, "ui_collapsed": self.ui_collapsed,
-                              "update_latest": self.update_latest, "update_notes": self.update_notes})
+                              "update_latest": self.update_latest, "update_notes": self.update_notes,
+                              "backup_auto": self.backup_auto, "backup_dir": self.backup_dir,
+                              "backup_keep": self.backup_keep, "backup_last": self.backup_last,
+                              "backup_last_hash": self.backup_last_hash,
+                              "sun_auto_align": self.sun_auto_align, "favorites": self.favorites})
 
     # ---------- выравнивание яркости ----------
     def norm_offset(self, path, ignore_enabled=False):
@@ -491,10 +649,10 @@ class Library:
 
     def unique_name(self, base):
         base = (base or "").strip() or "Group"
-        if base == ALL_GROUP:
+        if base in (ALL_GROUP, FAV_GROUP):
             base += " (1)"
         name, i = base, 2
-        while self._find(name) is not None or name == ALL_GROUP:
+        while self._find(name) is not None or name in (ALL_GROUP, FAV_GROUP):
             name = "%s %d" % (base, i)
             i += 1
         return name
@@ -507,7 +665,7 @@ class Library:
     def rename_group(self, old, new):
         new = (new or "").strip()
         g = self._find(old)
-        if g is None or not new or new == ALL_GROUP:
+        if g is None or not new or new in (ALL_GROUP, FAV_GROUP):
             return False
         if new != old and self._find(new) is not None:
             return False
@@ -521,7 +679,26 @@ class Library:
         if g is not None:
             self.groups.remove(g)
 
+    # ---------- избранное ----------
+    def is_favorite(self, path):
+        k = path_key(path)
+        return any(path_key(f) == k for f in self.favorites)
+
+    def set_favorite(self, paths, on):
+        keys = {path_key(p) for p in paths}
+        if on:
+            have = {path_key(f) for f in self.favorites}
+            for p in paths:
+                if path_key(p) not in have:
+                    self.favorites.append(norm_path(p))
+                    have.add(path_key(p))
+        else:
+            self.favorites = [f for f in self.favorites if path_key(f) not in keys]
+
     def files_of(self, name):
+        if name == FAV_GROUP:
+            inlib = {path_key(f) for g in self.groups for f in g["files"]}
+            return [f for f in self.favorites if path_key(f) in inlib]
         if name == ALL_GROUP:
             allf = []
             for g in self.groups:
@@ -548,12 +725,18 @@ class Library:
 
     def remove_files(self, name, paths):
         keys = {path_key(p) for p in paths}
+        if name == FAV_GROUP:
+            before = len(self.favorites)
+            self.set_favorite(paths, False)
+            return before - len(self.favorites)
         targets = self.groups if name == ALL_GROUP else [g for g in self.groups if g["name"] == name]
         removed = 0
         for g in targets:
             before = len(g["files"])
             g["files"] = [p for p in g["files"] if path_key(p) not in keys]
             removed += before - len(g["files"])
+        inlib = {path_key(f) for g in self.groups for f in g["files"]}
+        self.favorites = [f for f in self.favorites if path_key(f) in inlib]   # карта ушла из библиотеки — и из избранного
         return removed
 
 
@@ -612,18 +795,29 @@ class PresetStore:
 
 
 class SunCache:
-    """Найденная самая яркая точка HDRI: u, v, пик. Ключ включает mtime и размер файла."""
+    """Найденная самая яркая точка HDRI: u, v, пик. Ключ — имя по содержимому файла (как у превью)."""
 
     def __init__(self, path=CACHE_FILE):
         self.path = path
         d = load_json(path, {})
         self.sun = d.get("sun", {}) if isinstance(d, dict) else {}
 
+    @staticmethod
+    def _key(p):
+        cid = content_id(p)                           # v0.73: по содержимому — не теряется при переносе/переименовании
+        return ("c:" + cid) if cid else file_signature(p)
+
     def get(self, p):
-        return self.sun.get(file_signature(p))
+        k = self._key(p)
+        c = self.sun.get(k)
+        if c is None:                                 # запись старого формата (путь|дата|размер) -> переносим
+            c = self.sun.pop(file_signature(p), None)
+            if c is not None:
+                self.sun[k] = c
+        return c
 
     def put(self, p, u, v, peak):
-        self.sun[file_signature(p)] = {"u": u, "v": v, "peak": peak}
+        self.sun[self._key(p)] = {"u": u, "v": v, "peak": peak}
         if len(self.sun) > 2000:                      # не растём бесконечно
             for k in list(self.sun.keys())[:500]:
                 self.sun.pop(k, None)
@@ -631,6 +825,231 @@ class SunCache:
             save_json(self.path, {"version": 1, "sun": self.sun})
         except Exception:
             pass
+
+
+# ==========================================================================
+# 2b. Автобэкап библиотеки и превью (v0.73)
+# ==========================================================================
+# Папка бэкапов (по умолчанию Документы\SkyRig Studio\Backups):
+#   SkyRig_backup_2026-10-21_14-32-05_auto.zip — library.json, presets.json, cache.json и manifest.json
+#                                                (какие карты были в библиотеке и как называются их превью);
+#   thumbs\<имя>.lin                            — общее хранилище превью для всех бэкапов: каждое превью копируется
+#                                                один раз (имя по содержимому файла не меняется), поэтому 10 бэкапов
+#                                                занимают почти столько же места, сколько один.
+# Бэкап делается только по действию пользователя (создание превью, изменения библиотеки, закрытие окна библиотеки) —
+# никаких таймеров и фоновых потоков. PNG в бэкап не входят: они за доли секунды строятся из .lin.
+BACKUP_PREFIX = "SkyRig_backup_"
+BACKUP_MANIFEST = "manifest.json"
+BACKUP_THUMBS = "thumbs"
+BACKUP_KEEP_DEFAULT = 10
+BACKUP_MIN_INTERVAL = 10 * 60          # автобэкап не чаще, чем раз в 10 минут (кроме бэкапа после создания превью)
+
+
+def default_backup_dir():
+    try:
+        docs = QtCore.QStandardPaths.writableLocation(QtCore.QStandardPaths.DocumentsLocation)
+    except Exception:
+        docs = ""
+    if not docs:
+        docs = os.path.join(os.path.expanduser("~"), "Documents")
+    return os.path.normpath(os.path.join(docs, "SkyRig Studio", "Backups"))
+
+
+def backup_dir(lib):
+    d = getattr(lib, "backup_dir", "") or ""
+    return d if d else default_backup_dir()
+
+
+def _library_thumb_map(lib):
+    """{путь: имя превью} для карт библиотеки, у которых есть превью (.lin)."""
+    out = {}
+    for f in lib.files_of(ALL_GROUP):
+        if not os.path.isfile(f):
+            continue
+        cid = thumb_name(f)
+        if os.path.isfile(os.path.join(THUMB_DIR, cid + ".lin")):
+            out[f] = cid
+    return out
+
+
+def library_state_hash(lib):
+    """Отпечаток того, что стоит беречь: группы, теги, измерения, пресеты и набор превью."""
+    try:
+        presets = load_json(PRESET_FILE, {})
+    except Exception:
+        presets = {}
+    data = {"groups": lib.groups, "tags": lib.tags, "auto_light": lib.auto_light, "brightness": lib.brightness,
+            "norm_ref": lib.norm_ref, "presets": presets, "favorites": sorted(getattr(lib, "favorites", []) or []),
+            "thumbs": sorted(_library_thumb_map(lib).values())}
+    return hashlib.sha1(json.dumps(data, sort_keys=True, ensure_ascii=False, default=str).encode("utf-8")).hexdigest()
+
+
+def list_backups(lib):
+    """[(путь к zip, manifest)] — новые первыми. Битые архивы пропускаются."""
+    d = backup_dir(lib)
+    out = []
+    try:
+        names = [n for n in os.listdir(d) if n.startswith(BACKUP_PREFIX) and n.lower().endswith(".zip")]
+    except OSError:
+        return out
+    for n in sorted(names, reverse=True):
+        path = os.path.join(d, n)
+        try:
+            with zipfile.ZipFile(path) as z:
+                man = json.loads(z.read(BACKUP_MANIFEST).decode("utf-8"))
+            if isinstance(man, dict):
+                out.append((path, man))
+        except Exception:
+            continue
+    out.sort(key=lambda it: (float(it[1].get("created", 0) or 0), it[0]), reverse=True)
+    return out
+
+
+def _prune_backups(lib):
+    keep = max(1, int(getattr(lib, "backup_keep", BACKUP_KEEP_DEFAULT) or BACKUP_KEEP_DEFAULT))
+    items = list_backups(lib)
+    for path, _man in items[keep:]:
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+    used = set()
+    for _path, man in items[:keep]:
+        used.update((man.get("thumbs") or {}).values())
+    tdir = os.path.join(backup_dir(lib), BACKUP_THUMBS)
+    try:
+        for n in os.listdir(tdir):
+            if n.endswith(".lin") and n[:-4] not in used:
+                try:
+                    os.remove(os.path.join(tdir, n))
+                except OSError:
+                    pass
+    except OSError:
+        pass
+
+
+def make_backup(lib, kind="auto"):
+    """Создаёт бэкап. Возвращает путь к zip. Бросает исключение, если папка недоступна."""
+    lib.save()                                         # в бэкап попадает то, что сейчас в памяти
+    save_thumb_index()
+    d = backup_dir(lib)
+    tdir = os.path.join(d, BACKUP_THUMBS)
+    os.makedirs(tdir, exist_ok=True)
+    thumbs = _library_thumb_map(lib)
+    for cid in set(thumbs.values()):
+        dst = os.path.join(tdir, cid + ".lin")
+        if not os.path.isfile(dst):                    # имя по содержимому: если файл уже есть, он тот же самый
+            tmp = dst + ".tmp"
+            shutil.copyfile(os.path.join(THUMB_DIR, cid + ".lin"), tmp)
+            os.replace(tmp, dst)
+    stamp = time.strftime("%Y-%m-%d_%H-%M-%S")
+    path = os.path.join(d, "%s%s_%s.zip" % (BACKUP_PREFIX, stamp, kind))
+    man = {"format": "SkyRigStudioBackup", "version": 1, "app_version": VERSION, "created": time.time(),
+           "kind": kind, "maps": len(lib.files_of(ALL_GROUP)), "thumbs": thumbs}
+    tmp = path + ".tmp"
+    with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as z:
+        for f in (LIB_FILE, PRESET_FILE, CACHE_FILE):
+            if os.path.isfile(f):
+                z.write(f, os.path.basename(f))
+        z.writestr(BACKUP_MANIFEST, json.dumps(man, ensure_ascii=False, indent=1))
+    os.replace(tmp, path)
+    lib.backup_last = time.time()
+    lib.backup_last_hash = library_state_hash(lib)
+    lib.save()
+    _prune_backups(lib)
+    alog("backup %s: %s (%d previews)" % (kind, os.path.basename(path), len(thumbs)))
+    return path
+
+
+def maybe_auto_backup(lib, force=False):
+    """Автобэкап, если он включён и есть что беречь. force — не ждать 10 минут (после создания превью).
+    Возвращает путь к новому бэкапу или None. Ничего не выбрасывает."""
+    try:
+        if not getattr(lib, "backup_auto", True) or not lib.groups:
+            return None
+        if not force and time.time() - float(getattr(lib, "backup_last", 0.0) or 0.0) < BACKUP_MIN_INTERVAL:
+            return None
+        if library_state_hash(lib) == getattr(lib, "backup_last_hash", ""):
+            return None
+        return make_backup(lib, "auto")
+    except Exception:
+        print("[SkyRig Studio] auto-backup error:\n" + traceback.format_exc())
+        return None
+
+
+def missing_thumbs_in_backup(lib, files):
+    """Карты из files без превью, для которых превью есть в хранилище бэкапов -> [путь]."""
+    tdir = os.path.join(backup_dir(lib), BACKUP_THUMBS)
+    if not os.path.isdir(tdir):
+        return []
+    by_path = {}
+    for _path, man in list_backups(lib):               # старое имя по пути — на случай, если файл изменился
+        for f, cid in (man.get("thumbs") or {}).items():
+            by_path.setdefault(path_key(f), cid)
+    out = []
+    for f in files:
+        if not os.path.isfile(f):
+            continue
+        cid = thumb_name(f)
+        if os.path.isfile(os.path.join(THUMB_DIR, cid + ".lin")):
+            continue
+        if os.path.isfile(os.path.join(tdir, cid + ".lin")) or \
+                os.path.isfile(os.path.join(tdir, by_path.get(path_key(f), "-") + ".lin")):
+            out.append(f)
+    return out
+
+
+def restore_missing_thumbs(lib, files=None):
+    """Возвращает из хранилища бэкапов превью, которых нет в кэше. Текущая библиотека не меняется.
+    Возвращает список карт, у которых превью восстановлено (PNG строятся потом через make_thumb)."""
+    files = lib.files_of(ALL_GROUP) if files is None else files
+    tdir = os.path.join(backup_dir(lib), BACKUP_THUMBS)
+    by_path = {}
+    for _path, man in list_backups(lib):
+        for f, cid in (man.get("thumbs") or {}).items():
+            by_path.setdefault(path_key(f), cid)
+    os.makedirs(THUMB_DIR, exist_ok=True)
+    done = []
+    for f in missing_thumbs_in_backup(lib, files):
+        cid = thumb_name(f)
+        src = os.path.join(tdir, cid + ".lin")
+        if not os.path.isfile(src):
+            src = os.path.join(tdir, by_path.get(path_key(f), "-") + ".lin")
+        try:
+            tmp = os.path.join(THUMB_DIR, cid + ".lin.tmp")
+            shutil.copyfile(src, tmp)
+            os.replace(tmp, os.path.join(THUMB_DIR, cid + ".lin"))
+            done.append(f)
+        except OSError:
+            continue
+    if done:
+        alog("restored %d previews from backup" % len(done))
+    return done
+
+
+def restore_everything(lib, backup_path):
+    """Полный откат: library.json, presets.json и cache.json из бэкапа (перед этим — бэкап текущего состояния),
+    затем недостающие превью. После вызова библиотеку, пресеты и кэш солнца нужно перечитать с диска."""
+    with zipfile.ZipFile(backup_path) as z:
+        names = set(z.namelist())
+        if BACKUP_MANIFEST not in names:
+            raise ValueError("this is not a SkyRig Studio backup")
+        make_backup(lib, "before-restore")
+        keep = {k: getattr(lib, k) for k in ("backup_auto", "backup_dir", "backup_keep")}   # настройки бэкапа — текущие
+        for f in (LIB_FILE, PRESET_FILE, CACHE_FILE):
+            n = os.path.basename(f)
+            if n in names:
+                tmp = f + ".tmp"
+                with open(tmp, "wb") as fh:
+                    fh.write(z.read(n))
+                os.replace(tmp, f)
+        d = load_json(LIB_FILE, {})
+        if isinstance(d, dict):
+            d.update(keep)
+            d["backup_last"] = time.time()
+            d["backup_last_hash"] = ""
+            save_json(LIB_FILE, d)
+    alog("restored everything from %s" % os.path.basename(backup_path))
 
 
 # ==========================================================================
@@ -2037,7 +2456,7 @@ ACG_SITE = "ambientCG"
 ACG_API = "https://ambientcg.com/api/v3/assets"
 ACG_UA = "SkyRigStudio/%s (3ds Max script)" % VERSION
 ACG_RES_ORDER = ["1K", "2K", "4K", "8K", "12K", "16K"]
-ACG_THUMB_DIR = os.path.join(DATA_DIR, "acg_thumbs")
+ACG_THUMB_DIR = os.path.join(LOCAL_DIR, "acg_thumbs")
 ACG_THUMB_KEY = "256-JPG-242424"
 ACG_SORTS = (("Popular", "popular"), ("Newest", "latest"),
              ("Most downloads", "downloads"), ("Alphabetical", "alphabet"))
@@ -2047,7 +2466,7 @@ def acg_open(url, timeout=25):
     return urllib.request.urlopen(urllib.request.Request(url, headers={"User-Agent": ACG_UA}), timeout=timeout)
 
 
-ACG_CATALOG_FILE = os.path.join(DATA_DIR, "acg_catalog.json")
+ACG_CATALOG_FILE = os.path.join(LOCAL_DIR, "acg_catalog.json")
 ACG_LIGHT_RULES = (                      # тип освещения по названию и тегам сайта (приблизительно)
     (LIGHT_MORNING, ("morning", "sunrise", "dawn")),
     (LIGHT_AFTERNOON, ("afternoon",)),
@@ -2841,8 +3260,8 @@ class AmbientCGDialog(QtWidgets.QDialog):
 # ==========================================================================
 PH_SITE = "Poly Haven"
 PH_API = "https://api.polyhaven.com"
-PH_THUMB_DIR = os.path.join(DATA_DIR, "ph_thumbs")
-PH_CATALOG_FILE = os.path.join(DATA_DIR, "ph_catalog.json")
+PH_THUMB_DIR = os.path.join(LOCAL_DIR, "ph_thumbs")
+PH_CATALOG_FILE = os.path.join(LOCAL_DIR, "ph_catalog.json")
 PH_CATS = ("All", "Sky", "Nature", "City", "Interior", "Studio")
 PH_STD_K = (1, 2, 4, 8, 16, 24)
 
@@ -3139,6 +3558,258 @@ class PolyHavenDialog(AmbientCGDialog):
                 pass
 
 
+def _reload_in_place(obj, cls):
+    """Перечитывает объект хранилища с диска, сохраняя сам объект (на него ссылаются главное окно и библиотека)."""
+    fresh = cls()
+    obj.__dict__.clear()
+    obj.__dict__.update(fresh.__dict__)
+
+
+def _fmt_size(n):
+    for unit in ("B", "KB", "MB", "GB"):
+        if n < 1024 or unit == "GB":
+            return ("%d %s" % (n, unit)) if unit == "B" else ("%.1f %s" % (n, unit))
+        n /= 1024.0
+
+
+def _fmt_when(ts):
+    try:
+        t = time.localtime(float(ts))
+    except (TypeError, ValueError):
+        return "—"
+    now = time.localtime()
+    if t.tm_year == now.tm_year and t.tm_yday == now.tm_yday:
+        return "today " + time.strftime("%H:%M", t)
+    if t.tm_year == now.tm_year and t.tm_yday == now.tm_yday - 1:
+        return "yesterday " + time.strftime("%H:%M", t)
+    return time.strftime("%b %d, %H:%M", t)
+
+
+def backup_status_text(lib):
+    if not lib.backup_auto:
+        return "Auto-backup is off"
+    if not lib.backup_last:
+        return "No backups yet"
+    return "✓ Auto-backup · " + _fmt_when(lib.backup_last)
+
+
+class BackupDialog(QtWidgets.QDialog):
+    """Backup & Restore: настройки автобэкапа, список бэкапов, восстановление."""
+
+    def __init__(self, parent, library, presets=None, sun_cache=None):
+        super().__init__(parent)
+        self.setWindowTitle("Backup & Restore — HDRI Library")
+        self.resize(720, 560)
+        self.lib = library
+        self.presets = presets
+        self.sun_cache = sun_cache
+        self.restored_all = False
+        self.restored_thumbs = []
+        lay = QtWidgets.QVBoxLayout(self)
+
+        box = QtWidgets.QGroupBox("Automatic backup")
+        g = QtWidgets.QGridLayout(box)
+        self.chk_auto = QtWidgets.QCheckBox("Back up the library automatically")
+        self.chk_auto.setChecked(self.lib.backup_auto)
+        self.chk_auto.setToolTip("A backup is made after previews are created, after the library changes "
+                                 "(at most every 10 minutes) and when the library window is closed.")
+        self.chk_auto.toggled.connect(self._on_auto)
+        g.addWidget(self.chk_auto, 0, 0, 1, 3)
+        g.addWidget(QtWidgets.QLabel("Keep the last"), 1, 0)
+        self.sp_keep = QtWidgets.QSpinBox()
+        self.sp_keep.setRange(1, 100)
+        self.sp_keep.setValue(self.lib.backup_keep)
+        self.sp_keep.setSuffix(" backups")
+        self.sp_keep.valueChanged.connect(self._on_keep)
+        g.addWidget(self.sp_keep, 1, 1)
+        g.addWidget(QtWidgets.QLabel("older ones are deleted automatically"), 1, 2)
+        lay.addWidget(box)
+
+        box = QtWidgets.QGroupBox("Backup folder")
+        v = QtWidgets.QVBoxLayout(box)
+        row = QtWidgets.QHBoxLayout()
+        self.ed_dir = QtWidgets.QLineEdit(backup_dir(self.lib))
+        self.ed_dir.setReadOnly(True)
+        b_ch = QtWidgets.QPushButton("Change...")
+        b_ch.clicked.connect(self._change_dir)
+        b_def = QtWidgets.QPushButton("Default")
+        b_def.setToolTip(default_backup_dir())
+        b_def.clicked.connect(self._default_dir)
+        b_open = QtWidgets.QPushButton("Open")
+        b_open.clicked.connect(lambda: QtGui.QDesktopServices.openUrl(QtCore.QUrl.fromLocalFile(backup_dir(self.lib))))
+        for w in (self.ed_dir, b_ch, b_def, b_open):
+            row.addWidget(w, 1 if w is self.ed_dir else 0)
+        v.addLayout(row)
+        note = QtWidgets.QLabel("A backup holds the library (groups, tags, brightness, reference), presets, the sun cache "
+                                "and the previews. HDRI files are not copied: they stay in their own folders. "
+                                "Previews are stored once and shared by all backups, so ten backups take about as much "
+                                "space as one.")
+        note.setWordWrap(True)
+        note.setStyleSheet("color: #a0a0a0;")
+        v.addWidget(note)
+        lay.addWidget(box)
+
+        box = QtWidgets.QGroupBox("Backups")
+        v = QtWidgets.QVBoxLayout(box)
+        self.tbl = QtWidgets.QTreeWidget()
+        self.tbl.setRootIsDecorated(False)
+        self.tbl.setHeaderLabels(["Date", "Type", "Maps", "Previews", "Version"])
+        self.tbl.setSelectionMode(QtWidgets.QAbstractItemView.SingleSelection)
+        v.addWidget(self.tbl, 1)
+        row = QtWidgets.QHBoxLayout()
+        self.b_missing = QtWidgets.QPushButton("Restore missing previews")
+        self.b_missing.setToolTip("Copies back only the previews that are missing now. Your current library is not changed.")
+        self.b_missing.clicked.connect(self._restore_missing)
+        self.b_all = QtWidgets.QPushButton("Restore everything...")
+        self.b_all.setToolTip("Replaces the library, presets and sun cache with the selected backup. "
+                              "A backup of the current state is made first, so this can be undone.")
+        self.b_all.clicked.connect(self._restore_all)
+        self.b_del = QtWidgets.QPushButton("Delete backup")
+        self.b_del.clicked.connect(self._delete)
+        row.addWidget(self.b_missing)
+        row.addWidget(self.b_all)
+        row.addStretch(1)
+        row.addWidget(self.b_del)
+        v.addLayout(row)
+        lay.addWidget(box, 1)
+
+        row = QtWidgets.QHBoxLayout()
+        self.lbl = QtWidgets.QLabel("")
+        self.lbl.setWordWrap(True)
+        b_now = QtWidgets.QPushButton("Back up now")
+        b_now.clicked.connect(self._backup_now)
+        b_close = QtWidgets.QPushButton("Close")
+        b_close.clicked.connect(self.accept)
+        row.addWidget(self.lbl, 1)
+        row.addWidget(b_now)
+        row.addWidget(b_close)
+        lay.addLayout(row)
+        disable_default_buttons(self)
+        self._fill()
+
+    def _msg(self, text, error=False):
+        self.lbl.setStyleSheet("color: #ff7070;" if error else "")
+        self.lbl.setText(text)
+
+    def _fill(self):
+        self.tbl.clear()
+        items = list_backups(self.lib)
+        for path, man in items:
+            th = man.get("thumbs") or {}
+            it = QtWidgets.QTreeWidgetItem([_fmt_when(man.get("created", 0)), str(man.get("kind", "")),
+                                            str(man.get("maps", "")), str(len(th)), str(man.get("app_version", ""))])
+            it.setData(0, QtCore.Qt.UserRole, path)
+            it.setToolTip(0, path)
+            self.tbl.addTopLevelItem(it)
+        if items:
+            self.tbl.setCurrentItem(self.tbl.topLevelItem(0))
+        for i in range(5):
+            self.tbl.resizeColumnToContents(i)
+        has = bool(items)
+        for b in (self.b_missing, self.b_all, self.b_del):
+            b.setEnabled(has)
+        self._msg(("Backups: %d. " % len(items) if has else "No backups yet. ") + backup_status_text(self.lib))
+
+    def _sel(self):
+        it = self.tbl.currentItem()
+        return it.data(0, QtCore.Qt.UserRole) if it else None
+
+    def _on_auto(self, on):
+        self.lib.backup_auto = bool(on)
+        self.lib.save()
+        self._fill()
+
+    def _on_keep(self, n):
+        self.lib.backup_keep = int(n)
+        self.lib.save()
+
+    def _set_dir(self, d):
+        self.lib.backup_dir = d
+        self.lib.backup_last_hash = ""                 # в новой папке бэкапов ещё нет: следующий сделается сразу
+        self.lib.save()
+        self.ed_dir.setText(backup_dir(self.lib))
+        self._fill()
+
+    def _change_dir(self):
+        d = QtWidgets.QFileDialog.getExistingDirectory(self, "Backup folder", backup_dir(self.lib))
+        if d:
+            self._set_dir(os.path.normpath(d))
+
+    def _default_dir(self):
+        self._set_dir("")
+
+    def _backup_now(self):
+        try:
+            path = make_backup(self.lib, "manual")
+        except Exception as ex:
+            print("[SkyRig Studio] backup error:\n" + traceback.format_exc())
+            self._msg("Could not create a backup: %s" % ex, error=True)
+            return
+        self._fill()
+        self._msg("Backup created: %s" % os.path.basename(path))
+
+    def _restore_missing(self):
+        try:
+            done = restore_missing_thumbs(self.lib)
+        except Exception as ex:
+            print("[SkyRig Studio] restore error:\n" + traceback.format_exc())
+            self._msg("Could not restore previews: %s" % ex, error=True)
+            return
+        for p in done:
+            try:
+                make_thumb(p, self.lib.thumb_ev)
+            except Exception:
+                pass
+        self.restored_thumbs.extend(done)
+        self._msg("Previews restored: %d." % len(done) if done else "No missing previews were found in the backups.")
+
+    def _restore_all(self):
+        path = self._sel()
+        if not path:
+            return
+        r = QtWidgets.QMessageBox.question(
+            self, "Restore everything",
+            "Replace the current library, presets and sun cache with the backup from %s?\n\n"
+            "A backup of the current state is made first, so you can go back." % self.tbl.currentItem().text(0))
+        if r != QtWidgets.QMessageBox.Yes:
+            return
+        try:
+            restore_everything(self.lib, path)
+            _reload_in_place(self.lib, Library)
+            if self.presets is not None:
+                _reload_in_place(self.presets, PresetStore)
+            if self.sun_cache is not None:
+                _reload_in_place(self.sun_cache, SunCache)
+            done = restore_missing_thumbs(self.lib)
+            for p in done:
+                try:
+                    make_thumb(p, self.lib.thumb_ev)
+                except Exception:
+                    pass
+        except Exception as ex:
+            print("[SkyRig Studio] restore error:\n" + traceback.format_exc())
+            self._msg("Could not restore: %s" % ex, error=True)
+            return
+        self.restored_all = True
+        self._fill()
+        self._msg("Library restored. Previews restored: %d." % len(done))
+
+    def _delete(self):
+        path = self._sel()
+        if not path:
+            return
+        if QtWidgets.QMessageBox.question(self, "Delete backup", "Delete the backup from %s?"
+                                          % self.tbl.currentItem().text(0)) != QtWidgets.QMessageBox.Yes:
+            return
+        try:
+            os.remove(path)
+        except OSError as ex:
+            self._msg("Could not delete: %s" % ex, error=True)
+            return
+        _prune_backups(self.lib)
+        self._fill()
+
+
 class LibraryDialog(QtWidgets.QDialog):
     """Браузер локальной библиотеки: группы слева, файлы с миниатюрами справа."""
 
@@ -3158,125 +3829,263 @@ class LibraryDialog(QtWidgets.QDialog):
         self._fill_groups()
 
     # ---------- интерфейс ----------
+    # Кнопки сгруппированы по задачам (v0.73):
+    #   верх — найти и получить карты (Add, Download, поиск, фильтр, сортировка, размер, меню Library);
+    #   слева — группы и «★ Favorites»; над сеткой — действия с выделенными картами (видны только при выделении);
+    #   справа — инспектор: выбранная карта и солнце, выравнивание яркости, превью; внизу — статус и Apply.
+    def _small_btn(self, text, tip, slot, width=26):
+        b = QtWidgets.QToolButton()
+        b.setText(text)
+        b.setToolTip(tip)
+        b.setFixedSize(width, 22)
+        b.clicked.connect(slot)
+        return b
+
+    def _section(self, title):
+        box = QtWidgets.QFrame()
+        box.setObjectName("insp_sec")
+        box.setStyleSheet("QFrame#insp_sec { border: none; border-bottom: 1px solid #333; }")
+        v = QtWidgets.QVBoxLayout(box)
+        v.setContentsMargins(10, 8, 10, 10)
+        v.setSpacing(6)
+        lbl = QtWidgets.QLabel(title)
+        lbl.setStyleSheet("color: %s; font-weight: bold;" % UI_ACCENT)
+        v.addWidget(lbl)
+        return box, v
+
     def _build(self):
-        root = QtWidgets.QHBoxLayout(self)
+        self.resize(1240, 760)
+        outer = QtWidgets.QVBoxLayout(self)
+        outer.setContentsMargins(8, 8, 8, 8)
+        outer.setSpacing(6)
 
-        left = QtWidgets.QVBoxLayout()
-        left.addWidget(QtWidgets.QLabel("Groups"))
-        self.lst_groups = QtWidgets.QListWidget()
-        self.lst_groups.setMinimumWidth(190)
-        self.lst_groups.currentItemChanged.connect(self._on_group_changed)
-        left.addWidget(self.lst_groups, 1)
-        row = QtWidgets.QHBoxLayout()
-        b_new = QtWidgets.QPushButton("Create")
-        b_new.clicked.connect(self._new_group)
-        b_ren = QtWidgets.QPushButton("Rename")
-        b_ren.clicked.connect(self._rename_group)
-        b_del = QtWidgets.QPushButton("Delete")
-        b_del.clicked.connect(self._delete_group)
-        row.addWidget(b_new)
-        row.addWidget(b_ren)
-        row.addWidget(b_del)
-        left.addLayout(row)
-        root.addLayout(left)
-
-        right = QtWidgets.QVBoxLayout()
+        # ===== A. верхняя панель: найти и получить карты =====
+        top = QtWidgets.QHBoxLayout()
+        self.b_add = QtWidgets.QPushButton("+ Add")
+        mark_primary(self.b_add)
+        m = QtWidgets.QMenu(self.b_add)
+        m.addAction("Add files...", self._add_files)
+        m.addAction("Add folder...", self._add_folder)
+        self.b_add.setMenu(m)
+        self.b_dl = QtWidgets.QPushButton("⬇ Download")
+        self.b_dl.setToolTip("Free CC0 HDRIs. Downloaded maps go to the “Poly Haven” / “ambientCG” group "
+                             "with lighting and resolution tags.")
+        m = QtWidgets.QMenu(self.b_dl)
+        m.addAction("From Poly Haven...", self._open_ph)
+        m.addAction("From ambientCG...", self._open_acg)
+        self.b_dl.setMenu(m)
         self.ed_search = QtWidgets.QLineEdit()
-        self.ed_search.setPlaceholderText("Search by file name and tags...")
+        self.ed_search.setPlaceholderText("Search by name or tag...")
         self.ed_search.setClearButtonEnabled(True)
         self.ed_search.textChanged.connect(self._fill_files)
-        row_s = QtWidgets.QHBoxLayout()
-        row_s.addWidget(self.ed_search, 1)
         self.cmb_tag = QtWidgets.QComboBox()
-        self.cmb_tag.setMinimumWidth(150)
-        self.cmb_tag.setToolTip("Filter by tag")
+        self.cmb_tag.setMinimumWidth(140)
+        self.cmb_tag.setToolTip("Filter by lighting or resolution tag")
         self.cmb_tag.currentIndexChanged.connect(self._fill_files)
-        row_s.addWidget(self.cmb_tag)
-        right.addLayout(row_s)
+        self.cmb_sort = QtWidgets.QComboBox()
+        for label, key in (("Sort: Name", "name"), ("Sort: Name (Z–A)", "name_desc"),
+                           ("Sort: Lighting", "light"), ("Sort: Newest file", "newest")):
+            self.cmb_sort.addItem(label, key)
+        self.cmb_sort.currentIndexChanged.connect(self._fill_files)
+        self.sl_size = QtWidgets.QSlider(QtCore.Qt.Horizontal)
+        self.sl_size.setRange(50, 125)                          # % от THUMB_W
+        self.sl_size.setValue(75)
+        self.sl_size.setFixedWidth(90)
+        self.sl_size.setToolTip("Thumbnail size")
+        self.sl_size.valueChanged.connect(self._on_thumb_size)
+        self.b_libmenu = QtWidgets.QPushButton("Library")
+        m = QtWidgets.QMenu(self.b_libmenu)
+        a_now = m.addAction("Back up now", self._backup_now)
+        a_now.setShortcut(QtGui.QKeySequence("Ctrl+B"))
+        m.addAction("Restore from backup...", self._open_backup)
+        m.addAction("Backup settings...", self._open_backup)
+        m.addSeparator()
+        m.addAction("Save library to file...", self._export_library)
+        m.addAction("Load library from file...", self._import_library)
+        m.addSeparator()
+        m.addAction("Open backup folder", lambda: QtGui.QDesktopServices.openUrl(
+            QtCore.QUrl.fromLocalFile(backup_dir(self.lib))))
+        self.b_libmenu.setMenu(m)
+        sc = QtGui.QShortcut(QtGui.QKeySequence("Ctrl+B"), self)
+        sc.activated.connect(self._backup_now)
+        top.addWidget(self.b_add)
+        top.addWidget(self.b_dl)
+        top.addSpacing(8)
+        top.addWidget(self.ed_search, 1)
+        top.addWidget(self.cmb_tag)
+        top.addWidget(self.cmb_sort)
+        top.addWidget(QtWidgets.QLabel("Size"))
+        top.addWidget(self.sl_size)
+        top.addSpacing(8)
+        top.addWidget(self.b_libmenu)
+        outer.addLayout(top)
         self._fill_tag_filter()
+
+        split = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
+        split.setChildrenCollapsible(False)
+        outer.addWidget(split, 1)
+
+        # ===== B. группы =====
+        left = QtWidgets.QWidget()
+        lv = QtWidgets.QVBoxLayout(left)
+        lv.setContentsMargins(0, 0, 0, 0)
+        hdr = QtWidgets.QHBoxLayout()
+        lab = QtWidgets.QLabel("GROUPS")
+        lab.setStyleSheet("color: #bdbdbd; font-weight: bold;")
+        hdr.addWidget(lab)
+        hdr.addStretch(1)
+        hdr.addWidget(self._small_btn("+", "New group", self._new_group))
+        hdr.addWidget(self._small_btn("✎", "Rename group", self._rename_group))
+        hdr.addWidget(self._small_btn("✕", "Delete group (files on disk are not deleted)", self._delete_group))
+        lv.addLayout(hdr)
+        self.lst_groups = QtWidgets.QListWidget()
+        self.lst_groups.setMinimumWidth(180)
+        self.lst_groups.currentItemChanged.connect(self._on_group_changed)
+        self.lst_groups.setContextMenuPolicy(QtCore.Qt.CustomContextMenu)
+        self.lst_groups.customContextMenuRequested.connect(self._group_menu)
+        lv.addWidget(self.lst_groups, 1)
+        hint = QtWidgets.QLabel("Right-click a group to rename or delete it.")
+        hint.setWordWrap(True)
+        hint.setStyleSheet("color: #8f8f8f;")
+        lv.addWidget(hint)
+        split.addWidget(left)
+
+        # ===== C. сетка + действия с выделенными =====
+        center = QtWidgets.QWidget()
+        cv = QtWidgets.QVBoxLayout(center)
+        cv.setContentsMargins(0, 0, 0, 0)
+        self.selbar = QtWidgets.QFrame()
+        self.selbar.setStyleSheet("QFrame { background: #4a4a4a; border-radius: 3px; }")
+        sb = QtWidgets.QHBoxLayout(self.selbar)
+        sb.setContentsMargins(8, 4, 8, 4)
+        self.lbl_sel = QtWidgets.QLabel("")
+        self.lbl_sel.setStyleSheet("font-weight: bold; background: transparent;")
+        self.b_togroup = QtWidgets.QPushButton("Add to group...")
+        self.b_togroup.clicked.connect(self._copy_to_group)
+        self.b_rem = QtWidgets.QPushButton("Remove from group")
+        self.b_rem.setToolTip("The file on disk is NOT deleted; it only disappears from this group.")
+        self.b_rem.clicked.connect(self._remove_files)
+        self.b_fav = QtWidgets.QPushButton("★ Add to Favorites")
+        self.b_fav.setStyleSheet("color: #ffc35a;")
+        self.b_fav.clicked.connect(self._toggle_favorites)
+        b_clr = QtWidgets.QPushButton("Clear selection")
+        b_clr.clicked.connect(lambda: self.lst_files.clearSelection())
+        for w in (self.lbl_sel, self.b_togroup, self.b_rem, self.b_fav):
+            sb.addWidget(w)
+        sb.addStretch(1)
+        sb.addWidget(b_clr)
+        self.selbar.setVisible(False)
+        cv.addWidget(self.selbar)
+
+        self.banner = QtWidgets.QFrame()
+        self.banner.setStyleSheet("QFrame { background: #4a3d28; border: 1px solid #8a6a32; border-radius: 3px; }"
+                                  "QLabel { color: #f0dcb8; border: none; background: transparent; }")
+        bl = QtWidgets.QHBoxLayout(self.banner)
+        bl.setContentsMargins(10, 6, 10, 6)
+        self.lbl_banner = QtWidgets.QLabel("")
+        self.lbl_banner.setWordWrap(True)
+        b_rb = QtWidgets.QPushButton("Restore from backup")
+        mark_primary(b_rb)
+        b_rb.clicked.connect(self._restore_from_banner)
+        b_rg = QtWidgets.QPushButton("Regenerate")
+        b_rg.clicked.connect(lambda: self._make_missing_thumbs())
+        bl.addWidget(self.lbl_banner, 1)
+        bl.addWidget(b_rb)
+        bl.addWidget(b_rg)
+        self.banner.setVisible(False)
+        cv.addWidget(self.banner)
 
         self.lst_files = QtWidgets.QListWidget()
         self.lst_files.setViewMode(QtWidgets.QListView.IconMode)
-        self.lst_files.setIconSize(QtCore.QSize(THUMB_W * 3 // 4, THUMB_H * 3 // 4))
-        self.lst_files.setGridSize(QtCore.QSize(THUMB_W * 3 // 4 + 24, THUMB_H * 3 // 4 + 44))
         self.lst_files.setResizeMode(QtWidgets.QListView.Adjust)
         self.lst_files.setMovement(QtWidgets.QListView.Static)
         self.lst_files.setWordWrap(True)
         self.lst_files.setSelectionMode(QtWidgets.QAbstractItemView.ExtendedSelection)
         self.lst_files.setUniformItemSizes(True)
         self.lst_files.itemDoubleClicked.connect(lambda _i: self._apply())
-        right.addWidget(self.lst_files, 1)
+        self.lst_files.itemSelectionChanged.connect(self._on_selection)
+        self.lst_files.setContextMenuPolicy(QtCore.Qt.CustomContextMenu)
+        self.lst_files.customContextMenuRequested.connect(self._file_menu)
+        self._apply_thumb_size()
+        cv.addWidget(self.lst_files, 1)
+        split.addWidget(center)
 
+        # ===== D. инспектор =====
+        insp = QtWidgets.QWidget()
+        iv = QtWidgets.QVBoxLayout(insp)
+        iv.setContentsMargins(0, 0, 0, 0)
+        iv.setSpacing(0)
+
+        sec, v = self._section("Selected map")
+        self.lbl_prev = QtWidgets.QLabel()
+        self.lbl_prev.setFixedHeight(130)
+        self.lbl_prev.setAlignment(QtCore.Qt.AlignCenter)
+        self.lbl_prev.setStyleSheet("background: #2e2e2e; border-radius: 3px;")
+        v.addWidget(self.lbl_prev)
+        self.lbl_mapname = QtWidgets.QLabel("—")
+        self.lbl_mapname.setWordWrap(True)
+        self.lbl_mapname.setStyleSheet("color: #ffffff; font-weight: bold;")
+        self.lbl_mapname.setMinimumHeight(18)
+        v.addWidget(self.lbl_mapname)
+        self.lbl_mapinfo = QtWidgets.QLabel("")
+        self.lbl_mapinfo.setStyleSheet("color: #b8b8b8;")
+        self.lbl_mapinfo.setWordWrap(True)
+        self.lbl_mapinfo.setMinimumHeight(72)
+        self.lbl_mapinfo.setAlignment(QtCore.Qt.AlignLeft | QtCore.Qt.AlignTop)
+        v.addWidget(self.lbl_mapinfo)
         row = QtWidgets.QHBoxLayout()
-        b_addf = QtWidgets.QPushButton("Add files...")
-        b_addf.clicked.connect(self._add_files)
-        b_addd = QtWidgets.QPushButton("Add folder...")
-        b_addd.clicked.connect(self._add_folder)
-        b_rem = QtWidgets.QPushButton("Remove from group")
-        b_rem.setToolTip("The file on disk is NOT deleted; it only disappears from this group.")
-        b_rem.clicked.connect(self._remove_files)
-        b_copy = QtWidgets.QPushButton("Add to group...")
-        b_copy.clicked.connect(self._copy_to_group)
-        b_tags = QtWidgets.QPushButton("Tags...")
-        b_tags.setToolTip("Add, replace or remove tags on the selected files.")
-        b_tags.clicked.connect(self._edit_tags)
-        b_acg = QtWidgets.QPushButton("Download from ambientCG...")
-        b_acg.setToolTip("Catalog of free HDRIs (CC0): pick by preview, resolution, folder. "
-                         "Downloaded maps go to the “ambientCG” group with lighting and resolution tags.")
-        b_acg.clicked.connect(self._open_acg)
-        b_ph = QtWidgets.QPushButton("Download from Poly Haven...")
-        b_ph.setToolTip("Catalog of free Poly Haven HDRIs (CC0): pick by preview, resolution up to 24K, HDR/EXR format, folder. "
-                        "Downloaded maps go to the “Poly Haven” group with lighting and resolution tags.")
-        b_ph.clicked.connect(self._open_ph)
-        for b in (b_addf, b_addd, b_rem, b_copy, b_tags, b_acg, b_ph):
-            row.addWidget(b)
-        right.addLayout(row)
+        self.b_sun = QtWidgets.QPushButton("☀ Detect sun...")
+        self.b_sun.setToolTip("Finds the sun position on the maps in advance. When such a map is applied, the sun is "
+                              "aligned with it immediately — no need to press “link to HDRI”.")
+        self._sun_menu = QtWidgets.QMenu(self.b_sun)
+        self._sun_menu.aboutToShow.connect(self._fill_sun_menu)
+        self.b_sun.setMenu(self._sun_menu)
+        row.addWidget(self.b_sun)
+        row.addStretch(1)
+        v.addLayout(row)
+        self.chk_sun_auto = QtWidgets.QCheckBox("Align the sun with the HDRI when a map is applied")
+        self.chk_sun_auto.setToolTip("If the scene has a Corona Sun, it is turned to the sun on the new map right away. "
+                                     "Maps without a distinct sun (overcast, night) leave the sun where it is.")
+        self.chk_sun_auto.setChecked(getattr(self.lib, "sun_auto_align", True))
+        self.chk_sun_auto.toggled.connect(self._on_sun_auto)
+        v.addWidget(self.chk_sun_auto)
+        iv.addWidget(sec)
 
-        row = QtWidgets.QHBoxLayout()
-        b_exp = QtWidgets.QPushButton("Save library to file...")
-        b_exp.setToolTip("Writes all groups and HDRI paths to one file so the library can be moved "
-                         "to another computer. The HDRIs and previews themselves are not copied.")
-        b_exp.clicked.connect(self._export_library)
-        b_imp = QtWidgets.QPushButton("Load library from file...")
-        b_imp.setToolTip("Loads groups and paths from a backup file (paths must match this computer).")
-        b_imp.clicked.connect(self._import_library)
-        b_light = QtWidgets.QPushButton("Detect lighting...")
-        b_light.setToolTip("Automatically tags HDRIs: morning, noon, afternoon, evening, night, overcast.")
-        b_light.clicked.connect(self._detect_light)
-        row.addWidget(b_exp)
-        row.addWidget(b_imp)
-        row.addWidget(b_light)
-        right.addLayout(row)
-
+        sec, v = self._section("Exposure balance")
+        self.lbl_norm = QtWidgets.QLabel("")
+        self.lbl_norm.setWordWrap(True)
+        self.lbl_norm.setStyleSheet("color: #b0b0b0;")
+        v.addWidget(self.lbl_norm)
         row = QtWidgets.QHBoxLayout()
         b_norm = QtWidgets.QPushButton("Balance brightness")
         b_norm.setToolTip("Measures how much light each HDRI in the library gives and calculates an exposure correction "
                           "relative to the reference. After that, Exposure is set automatically when you pick a map.")
         b_norm.clicked.connect(self._equalize)
-        b_norm0 = QtWidgets.QPushButton("Reset brightness")
+        b_norm0 = QtWidgets.QPushButton("Reset")
         b_norm0.setToolTip("Turns balancing off: Exposure returns to 0 (for the current map and for maps picked "
                            "later). Measurements are kept.")
         b_norm0.clicked.connect(self._reset_norm)
-        b_ref = QtWidgets.QPushButton("Reference = selected")
+        row.addWidget(b_norm)
+        row.addWidget(b_norm0)
+        v.addLayout(row)
+        b_ref = QtWidgets.QPushButton("Set selected as reference")
         b_ref.setToolTip("Make the map selected in the list the reference (corrections are recalculated immediately).")
         b_ref.clicked.connect(self._set_reference)
-        self.chk_norm_sun = QtWidgets.QCheckBox("Include the sun on the map")
+        v.addWidget(b_ref)
+        self.chk_norm_sun = QtWidgets.QCheckBox("Include the sun when measuring")
         self.chk_norm_sun.setToolTip("Off: brightness is measured from the sky, without the sun disc (you place the sun "
                                      "separately with Corona Sun). On: everything on the map is counted.")
         self.chk_norm_sun.setChecked(self.lib.norm_sun)
         self.chk_norm_sun.toggled.connect(self._on_norm_sun)
-        for wdg in (b_norm, b_norm0, b_ref, self.chk_norm_sun):
-            row.addWidget(wdg)
-        right.addLayout(row)
-        self.lbl_norm = QtWidgets.QLabel("")
-        self.lbl_norm.setStyleSheet("color: #b0b0b0;")
-        right.addWidget(self.lbl_norm)
-        self._update_norm_label()
+        v.addWidget(self.chk_norm_sun)
+        iv.addWidget(sec)
 
+        sec, v = self._section("Previews")
         row = QtWidgets.QHBoxLayout()
-        self.b_thumbs = QtWidgets.QPushButton("Create previews")
-        self.b_thumbs.setToolTip("Creates missing thumbnails (once; afterwards they come from the cache).")
-        self.b_thumbs.clicked.connect(self._make_missing_thumbs)
+        self.b_thumbs = QtWidgets.QPushButton("Create")
+        self.b_thumbs.setToolTip("Creates missing previews (once; afterwards they come from the cache). "
+                                 "Lighting tags are added at the same time.")
+        self.b_thumbs.clicked.connect(lambda: self._make_missing_thumbs())
         self.progress = QtWidgets.QProgressBar()
         self.progress.setRange(0, 100)
         self.progress.setTextVisible(True)
@@ -3288,59 +4097,394 @@ class LibraryDialog(QtWidgets.QDialog):
         row.addWidget(self.b_thumbs)
         row.addWidget(self.progress, 1)
         row.addWidget(self.b_cancel)
-        right.addLayout(row)
-
+        v.addLayout(row)
+        note = QtWidgets.QLabel("Lighting tags (Morning, Noon, Evening, Overcast...) are added automatically "
+                                "while previews are created.")
+        note.setWordWrap(True)
+        note.setStyleSheet("color: #8f8f8f;")
+        v.addWidget(note)
         row = QtWidgets.QHBoxLayout()
-        self.b_delthumbs = QtWidgets.QPushButton("Delete selected previews")
-        self.b_delthumbs.setToolTip("Deletes only the preview cache of the selected files. "
-                                    "HDRI files on disk and their place in groups are not affected.")
-        self.b_delthumbs.clicked.connect(self._delete_thumbs)
-        row.addWidget(self.b_delthumbs)
-        row.addSpacing(12)
-        row.addWidget(QtWidgets.QLabel("Preview exposure"))
+        row.addWidget(QtWidgets.QLabel("Display exposure"))
         self.sl_ev = QtWidgets.QSlider(QtCore.Qt.Horizontal)
         steps = int(THUMB_EV_RANGE * 4)
         self.sl_ev.setRange(-steps, steps)                       # шаг 0.25 EV
         self.sl_ev.setValue(int(round(self.lib.thumb_ev * 4)))
         self.sl_ev.setTracking(False)                            # пересчёт только при отпускании
         self.sl_ev.valueChanged.connect(self._on_ev_changed)
-        self.sl_ev.sliderMoved.connect(lambda v: self.lbl_ev.setText("%+.2f EV" % (v / 4.0)))
+        self.sl_ev.sliderMoved.connect(lambda v_: self.lbl_ev.setText("%+.2f EV" % (v_ / 4.0)))
         self.lbl_ev = QtWidgets.QLabel("%+.2f EV" % self.lib.thumb_ev)
-        self.lbl_ev.setMinimumWidth(64)
+        self.lbl_ev.setMinimumWidth(60)
         b_ev0 = QtWidgets.QPushButton("0")
         b_ev0.setMaximumWidth(28)
-        b_ev0.setToolTip("Reset preview exposure")
+        b_ev0.setToolTip("Reset display exposure")
         b_ev0.clicked.connect(lambda: self.sl_ev.setValue(0))
         row.addWidget(self.sl_ev, 1)
         row.addWidget(self.lbl_ev)
         row.addWidget(b_ev0)
-        right.addLayout(row)
+        v.addLayout(row)
+        b_light = QtWidgets.QPushButton("Re-detect lighting tags...")
+        b_light.setToolTip("Tags HDRIs again: morning, noon, afternoon, evening, night, overcast "
+                           "(for maps that got previews in older versions).")
+        b_light.clicked.connect(self._detect_light)
+        v.addWidget(b_light)
+        iv.addWidget(sec)
+        iv.addStretch(1)
+        insp.setMinimumHeight(insp.sizeHint().height() + 40)   # подписи с переносом не сжимаются друг на друга
 
+        scroll = QtWidgets.QScrollArea()
+        scroll.setWidget(insp)
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
+        scroll.setMinimumWidth(300)
+        scroll.setMaximumWidth(380)
+        split.addWidget(scroll)
+        split.setStretchFactor(0, 0)
+        split.setStretchFactor(1, 1)
+        split.setStretchFactor(2, 0)
+        split.setSizes([200, 700, 330])
+
+        # ===== E. низ: статус и выход =====
         row = QtWidgets.QHBoxLayout()
         self.lbl_info = QtWidgets.QLabel("")
         self.lbl_info.setWordWrap(True)
-        b_apply = QtWidgets.QPushButton("Apply selected")
-        b_apply.setMinimumHeight(30)
-        b_apply.clicked.connect(self._apply)
+        self.lbl_backup = ClickableLabel("")
+        self.lbl_backup.setToolTip("Backup & Restore...")
+        self.lbl_backup.clicked.connect(self._open_backup)
         b_close = QtWidgets.QPushButton("Close")
         b_close.setMinimumHeight(30)
         b_close.clicked.connect(self.accept)
+        b_apply = QtWidgets.QPushButton("Apply to scene")
+        b_apply.setMinimumHeight(30)
+        mark_primary(b_apply)
+        b_apply.clicked.connect(self._apply)
         row.addWidget(self.lbl_info, 1)
-        row.addWidget(b_apply)
+        row.addWidget(self.lbl_backup)
+        row.addSpacing(12)
         row.addWidget(b_close)
-        right.addLayout(row)
-        root.addLayout(right, 1)
+        row.addWidget(b_apply)
+        outer.addLayout(row)
+        self._update_norm_label()
+        self._update_backup_label()
+        self._update_inspector()
+
+    # ---------- новые элементы интерфейса (v0.73) ----------
+    def _apply_thumb_size(self):
+        k = self.sl_size.value() / 100.0 if hasattr(self, "sl_size") else 0.75
+        w, h = int(THUMB_W * k), int(THUMB_H * k)
+        self.lst_files.setIconSize(QtCore.QSize(w, h))
+        self.lst_files.setGridSize(QtCore.QSize(w + 24, h + 44))
+
+    def _on_thumb_size(self, *_):
+        self._apply_thumb_size()
+
+    def _on_selection(self):
+        paths = self._selected_paths()
+        n = len(paths)
+        self.selbar.setVisible(n > 0)
+        if n:
+            self.lbl_sel.setText("%d selected" % n)
+            allfav = all(self.lib.is_favorite(p) for p in paths)
+            self.b_fav.setText("☆ Remove from Favorites" if allfav else "★ Add to Favorites")
+            g = self._current_group()
+            self.b_rem.setText("Remove from Favorites" if g == FAV_GROUP else
+                               ("Remove from library" if g == ALL_GROUP else "Remove from group"))
+            self.b_rem.setVisible(g != FAV_GROUP)
+        self._update_inspector()
+
+    def _toggle_favorites(self):
+        paths = self._selected_paths()
+        if not paths:
+            return
+        on = not all(self.lib.is_favorite(p) for p in paths)
+        self.lib.set_favorite(paths, on)
+        self._save()
+        self._fill_groups(select=self._current_group())
+        self._info(("Added to Favorites: %d." if on else "Removed from Favorites: %d.") % len(paths))
+
+    def _backup_now(self):
+        if self._busy:
+            return
+        try:
+            path = make_backup(self.lib, "manual")
+        except Exception as ex:
+            print("[SkyRig Studio] backup error:\n" + traceback.format_exc())
+            self._info("Could not create a backup: %s" % ex, error=True)
+            return
+        self._update_backup_label()
+        self._info("Backup created: %s" % os.path.basename(path))
+
+    def _group_menu(self, pos):
+        it = self.lst_groups.itemAt(pos)
+        if it is None:
+            return
+        self.lst_groups.setCurrentItem(it)
+        g = it.data(QtCore.Qt.UserRole)
+        m = QtWidgets.QMenu(self)
+        a1 = m.addAction("Rename...", self._rename_group)
+        a2 = m.addAction("Delete...", self._delete_group)
+        for a in (a1, a2):
+            a.setEnabled(g not in (ALL_GROUP, FAV_GROUP))
+        m.addSeparator()
+        m.addAction("New group...", self._new_group)
+        m.exec(self.lst_groups.viewport().mapToGlobal(pos))
+
+    def _file_menu(self, pos):
+        it = self.lst_files.itemAt(pos)
+        if it is not None and not it.isSelected():
+            self.lst_files.clearSelection()
+            it.setSelected(True)
+        paths = self._selected_paths()
+        if not paths:
+            return
+        m = QtWidgets.QMenu(self)
+        m.addAction("Apply to scene", self._apply)
+        m.addSeparator()
+        allfav = all(self.lib.is_favorite(p) for p in paths)
+        m.addAction("☆ Remove from Favorites" if allfav else "★ Add to Favorites", self._toggle_favorites)
+        m.addAction("Add to group...", self._copy_to_group)
+        if self._current_group() != FAV_GROUP:
+            m.addAction(self.b_rem.text() + "...", self._remove_files)
+        m.addSeparator()
+        m.addAction("☀ Detect sun on selected", lambda: self._detect_sun([p for p in paths if os.path.isfile(p)]))
+        m.addAction("Open file location", lambda: QtGui.QDesktopServices.openUrl(
+            QtCore.QUrl.fromLocalFile(os.path.dirname(paths[0]))))
+        m.exec(self.lst_files.viewport().mapToGlobal(pos))
+
+    def _update_inspector(self):
+        if not hasattr(self, "lbl_prev"):
+            return
+        it = self.lst_files.currentItem() if hasattr(self, "lst_files") else None
+        sel = self._selected_paths() if hasattr(self, "lst_files") else []
+        p = (it.data(QtCore.Qt.UserRole) if it is not None and it.isSelected() else (sel[0] if sel else None))
+        if not p:
+            self.lbl_prev.setPixmap(QtGui.QPixmap())
+            self.lbl_prev.setText("Select a map")
+            self.lbl_mapname.setText("—")
+            self.lbl_mapinfo.setText("")
+            return
+        self.lbl_mapname.setText(("★ " if self.lib.is_favorite(p) else "") + os.path.basename(p))
+        if not os.path.isfile(p):
+            self.lbl_prev.setPixmap(QtGui.QPixmap())
+            self.lbl_prev.setText("File not found")
+            self.lbl_mapinfo.setText(p)
+            return
+        png = png_path(p, self.lib.thumb_ev)
+        pm = QtGui.QPixmap(png) if os.path.isfile(png) else QtGui.QPixmap()
+        if pm.isNull():
+            self.lbl_prev.setPixmap(QtGui.QPixmap())
+            self.lbl_prev.setText("No preview yet")
+        else:
+            self.lbl_prev.setText("")
+            self.lbl_prev.setPixmap(pm.scaled(self.lbl_prev.width() or 290, 130, QtCore.Qt.KeepAspectRatio,
+                                              QtCore.Qt.SmoothTransformation))
+        lines = []
+        try:
+            r = res_label(p)
+            if r:
+                lines.append("Resolution: %s" % r)
+        except Exception:
+            pass
+        light = self.lib.auto_light.get(path_key(p))
+        if light:
+            lines.append("Lighting: %s" % light)
+        cache = self._sun_cache()
+        c = None
+        try:
+            c = cache.get(p) if cache is not None else None
+        except Exception:
+            c = None
+        if c is None:
+            lines.append("Sun: not detected yet")
+        elif float(c.get("peak", 0)) >= SUN_MIN_PEAK:
+            az, el = hdri_pixel_to_direction(c["u"], c["v"], 0.0)
+            lines.append("Sun: found (on the map az %.1f° · el %.1f°)" % (az % 360.0, el))
+        else:
+            lines.append("Sun: no distinct sun on this map")
+        off = self.lib.norm_offset(p, ignore_enabled=True)
+        if off is not None:
+            lines.append("Brightness correction: %+.2f EV" % off)
+        self.lbl_mapinfo.setText("\n".join(lines))
 
     def _info(self, text, error=False):
         self.lbl_info.setStyleSheet("color: #ff7070;" if error else "")
         self.lbl_info.setText(text)
 
-    def _save(self):
+    def _save(self, force_backup=False):
         try:
             self.lib.save()
         except Exception:
             print("[SkyRig Studio] library save error:\n" + traceback.format_exc())
             self._info("Could not save the library (see Listener).", error=True)
+            return
+        save_thumb_index()
+        if maybe_auto_backup(self.lib, force=force_backup):
+            self._update_backup_label()
+
+    # ---------- солнце ----------
+    @staticmethod
+    def _fav_badge(pm):
+        """Звёздочка «в избранном» в левом нижнем углу превью."""
+        pm = pm.copy()
+        p = QtGui.QPainter(pm)
+        try:
+            p.setRenderHint(QtGui.QPainter.Antialiasing)
+            r = max(8, pm.height() // 7)
+            cx, cy = r + 6, pm.height() - r - 5
+            pts = []
+            for i in range(10):
+                ang = math.radians(-90 + i * 36)
+                rr = r if i % 2 == 0 else r * 0.45
+                pts.append(QtCore.QPointF(cx + rr * math.cos(ang), cy + rr * math.sin(ang)))
+            p.setPen(QtGui.QPen(QtGui.QColor(20, 20, 20, 220), 1.5))
+            p.setBrush(QtGui.QColor("#ffc35a"))
+            p.drawPolygon(QtGui.QPolygonF(pts))
+        finally:
+            p.end()
+        return pm
+
+    @staticmethod
+    def _sun_badge(pm):
+        """Значок «солнце найдено» в правом верхнем углу превью."""
+        pm = pm.copy()
+        p = QtGui.QPainter(pm)
+        try:
+            p.setRenderHint(QtGui.QPainter.Antialiasing)
+            r = max(7, pm.height() // 9)
+            cx, cy = pm.width() - r - 6, r + 6
+            p.setPen(QtGui.QPen(QtGui.QColor(20, 20, 20, 200), 2))
+            p.setBrush(QtGui.QColor(UI_ACCENT))
+            p.drawEllipse(QtCore.QPointF(cx, cy), r, r)
+        finally:
+            p.end()
+        return pm
+
+    def _sun_cache(self):
+        return getattr(self.owner, "sun_cache", None)
+
+    def _on_sun_auto(self, on):
+        self.lib.sun_auto_align = bool(on)
+        self._save()
+
+    def _fill_sun_menu(self):
+        m = self._sun_menu
+        m.clear()
+        sel = [p for p in self._selected_paths() if os.path.isfile(p)]
+        allf = [p for p in self.lib.files_of(ALL_GROUP) if os.path.isfile(p)]
+        a = m.addAction("On selected maps (%d)" % len(sel))
+        a.setEnabled(bool(sel))
+        a.triggered.connect(lambda *_: self._detect_sun(sel))
+        b = m.addAction("On all maps (%d)" % len(allf))
+        b.setEnabled(bool(allf))
+        b.triggered.connect(lambda *_: self._detect_sun(allf))
+
+    def _detect_sun(self, files):
+        cache = self._sun_cache()
+        if self._busy or cache is None:
+            return
+        todo = [p for p in files if cache.get(p) is None]
+        if not todo:
+            self._info("The sun position is already known for all %d map(s)." % len(files))
+            return
+        self._busy, self._cancel = True, False
+        self.b_thumbs.setEnabled(False)
+        self.b_sun.setEnabled(False)
+        self.b_cancel.setEnabled(True)
+        found = no_sun = failed = 0
+        try:
+            for i, p in enumerate(todo, 1):
+                if self._cancel:
+                    break
+                base_pc = (i - 1) * 100.0 / len(todo)
+
+                def prog(pc, _text, base_pc=base_pc, i=i):
+                    self.progress.setValue(int(base_pc + pc / len(todo)))
+                    self.progress.setFormat("Sun: %d of %d" % (i, len(todo)))
+                    QtWidgets.QApplication.processEvents()
+                    return not self._cancel
+
+                try:
+                    res = find_brightest(p, prog)
+                except Exception:
+                    print("[SkyRig Studio] find brightest error for %s:\n%s" % (p, traceback.format_exc()))
+                    res = None
+                if res is None:
+                    if not self._cancel:
+                        failed += 1
+                    continue
+                cache.put(p, *res)
+                if res[2] >= SUN_MIN_PEAK:
+                    found += 1
+                else:
+                    no_sun += 1
+            self.progress.setValue(100 if not self._cancel else self.progress.value())
+            self.progress.setFormat(("Cancelled" if self._cancel else "Done") + ": sun found on %d of %d" % (found, len(todo)))
+        finally:
+            self._busy = False
+            self.b_thumbs.setEnabled(True)
+            self.b_sun.setEnabled(True)
+            self.b_cancel.setEnabled(False)
+        save_thumb_index()
+        self._fill_files()
+        msg = "Sun found: %d." % found
+        if no_sun:
+            msg += " No distinct sun (overcast, night...): %d." % no_sun
+        if failed:
+            msg += " Could not read: %d." % failed
+        self._info(msg)
+
+    # ---------- бэкап ----------
+    def _update_backup_label(self):
+        if hasattr(self, "lbl_backup"):
+            t = backup_status_text(self.lib)
+            self.lbl_backup.setText(t)
+            self.lbl_backup.setStyleSheet("color: #9fc79f;" if t.startswith("✓") else "color: #b0b0b0;")
+
+    def _open_backup(self):
+        if self._busy:
+            return
+        save_thumb_index()
+        owner = self.owner
+        dlg = BackupDialog(self, self.lib, getattr(owner, "presets", None), getattr(owner, "sun_cache", None))
+        dlg.exec()
+        if dlg.restored_all:
+            self._fill_groups()
+            self._fill_tag_filter()
+            self._update_norm_label()
+            self.chk_norm_sun.setChecked(self.lib.norm_sun)
+            for fn in ("_refresh_presets", "_fill_presets"):
+                if hasattr(owner, fn):
+                    try:
+                        getattr(owner, fn)()
+                    except Exception:
+                        pass
+                    break
+        elif dlg.restored_thumbs:
+            self._fill_files()
+        self._update_backup_label()
+
+    def _restore_from_banner(self):
+        if self._busy:
+            return
+        try:
+            done = restore_missing_thumbs(self.lib, self.lib.files_of(self._current_group()))
+        except Exception as ex:
+            print("[SkyRig Studio] restore error:\n" + traceback.format_exc())
+            self._info("Could not restore previews: %s" % ex, error=True)
+            return
+        for p in done:
+            try:
+                make_thumb(p, self.lib.thumb_ev)
+            except Exception:
+                pass
+        self._fill_files()
+        self._info("Previews restored from backup: %d." % len(done))
+
+    def done(self, r):
+        try:
+            self._save(force_backup=True)              # при закрытии — бэкап, если что-то изменилось
+        except Exception:
+            pass
+        super().done(r)
 
     # ---------- группы ----------
     def _current_group(self):
@@ -3350,11 +4494,14 @@ class LibraryDialog(QtWidgets.QDialog):
     def _fill_groups(self, select=None):
         self.lst_groups.blockSignals(True)
         self.lst_groups.clear()
-        entries = [ALL_GROUP] + self.lib.names()
+        entries = [FAV_GROUP, ALL_GROUP] + self.lib.names()
         for n in entries:
             cnt = len(self.lib.files_of(n))
             it = QtWidgets.QListWidgetItem("%s  (%d)" % (n, cnt))
             it.setData(QtCore.Qt.UserRole, n)
+            if n == FAV_GROUP:
+                it.setForeground(QtGui.QBrush(QtGui.QColor("#ffc35a")))
+                it.setToolTip("Maps you starred. Select maps and press “★ Add to Favorites” (or right-click).")
             self.lst_groups.addItem(it)
         want = select or self.lib.last_group or ALL_GROUP
         row = entries.index(want) if want in entries else 0
@@ -3375,8 +4522,8 @@ class LibraryDialog(QtWidgets.QDialog):
 
     def _rename_group(self):
         g = self._current_group()
-        if g == ALL_GROUP:
-            self._info("Group “%s” cannot be renamed." % ALL_GROUP)
+        if g in (ALL_GROUP, FAV_GROUP):
+            self._info("Group “%s” cannot be renamed." % g)
             return
         name, ok = QtWidgets.QInputDialog.getText(self, "Rename group", "New name:", text=g)
         if ok and name.strip():
@@ -3388,8 +4535,8 @@ class LibraryDialog(QtWidgets.QDialog):
 
     def _delete_group(self):
         g = self._current_group()
-        if g == ALL_GROUP:
-            self._info("Group “%s” cannot be deleted." % ALL_GROUP)
+        if g in (ALL_GROUP, FAV_GROUP):
+            self._info("Group “%s” cannot be deleted." % g)
             return
         r = QtWidgets.QMessageBox.question(
             self, "Delete group",
@@ -3455,8 +4602,24 @@ class LibraryDialog(QtWidgets.QDialog):
         tag_f = (self.cmb_tag.currentData() or "").casefold() if hasattr(self, "cmb_tag") else ""
         group = self._current_group()
         files = self.lib.files_of(group)
+        key = self.cmb_sort.currentData() if hasattr(self, "cmb_sort") else "name"
+        if key in ("name", "name_desc"):
+            files = sorted(files, key=lambda f: os.path.basename(f).casefold(), reverse=(key == "name_desc"))
+        elif key == "light":
+            order = {c: i for i, c in enumerate(LIGHT_CLASSES)}
+            files = sorted(files, key=lambda f: (order.get(self.lib.auto_light.get(path_key(f)), 99),
+                                                 os.path.basename(f).casefold()))
+        elif key == "newest":
+            def _mt(f):
+                try:
+                    return os.path.getmtime(f)
+                except OSError:
+                    return 0.0
+            files = sorted(files, key=_mt, reverse=True)
+        sel_keys = {path_key(x) for x in self._selected_paths()} if hasattr(self, "lst_files") else set()
         self.lst_files.setUpdatesEnabled(False)
         self.lst_files.clear()
+        sun_cache = self._sun_cache() if hasattr(self, "owner") else None
         missing = 0
         no_thumb = 0
         for p in files:
@@ -3466,13 +4629,24 @@ class LibraryDialog(QtWidgets.QDialog):
                 continue
             if q and q not in base.lower() and not any(q in t.lower() for t in ptags):
                 continue
+            exists = os.path.isfile(p)
+            sun = None
+            if exists and sun_cache is not None:
+                try:
+                    sun = sun_cache.get(p)
+                except Exception:
+                    sun = None
+            has_sun = bool(sun) and float(sun.get("peak", 0)) >= SUN_MIN_PEAK
             it = QtWidgets.QListWidgetItem(base)
             it.setData(QtCore.Qt.UserRole, p)
-            exists = os.path.isfile(p)
             png = png_path(p, self.lib.thumb_ev)
             if exists and os.path.isfile(png):
                 pm = QtGui.QPixmap(png)
                 if not pm.isNull():
+                    if has_sun:
+                        pm = self._sun_badge(pm)
+                    if self.lib.is_favorite(p):
+                        pm = self._fav_badge(pm)
                     it.setIcon(QtGui.QIcon(pm))
             elif exists:
                 no_thumb += 1
@@ -3481,13 +4655,32 @@ class LibraryDialog(QtWidgets.QDialog):
                 it.setForeground(QtGui.QBrush(QtGui.QColor("#ff7070")))
                 it.setToolTip("File not found:\n" + p)
             else:
-                it.setToolTip(p + ("\nTags: " + ", ".join(ptags) if ptags else ""))
+                tip = p + ("\nTags: " + ", ".join(ptags) if ptags else "")
+                if sun:
+                    tip += "\nSun: found" if has_sun else "\nSun: no distinct sun on this map"
+                it.setToolTip(tip)
             if path_key(p) == path_key(self.current_path or ""):
                 f = it.font()
                 f.setBold(True)
                 it.setFont(f)
             self.lst_files.addItem(it)
+            if path_key(p) in sel_keys:
+                it.setSelected(True)
         self.lst_files.setUpdatesEnabled(True)
+        if hasattr(self, "selbar"):
+            self._on_selection()
+        n_rest = 0
+        if no_thumb and hasattr(self, "banner"):
+            try:
+                n_rest = len(missing_thumbs_in_backup(self.lib, files))
+            except Exception:
+                n_rest = 0
+        if n_rest:
+            self.lbl_banner.setText("⚠  <b>%d preview%s missing.</b> The backup from %s has %s." % (
+                n_rest, " is" if n_rest == 1 else "s are", _fmt_when(self.lib.backup_last),
+                "it" if n_rest == 1 else "them"))
+        if hasattr(self, "banner"):
+            self.banner.setVisible(bool(n_rest))
         msg = "Files: %d" % len(files)
         if no_thumb:
             msg += ", without preview: %d" % no_thumb
@@ -3500,7 +4693,7 @@ class LibraryDialog(QtWidgets.QDialog):
 
     def _target_group_for_add(self):
         g = self._current_group()
-        if g != ALL_GROUP:
+        if g not in (ALL_GROUP, FAV_GROUP):
             return g
         return self._ask_group("Which group should they be added to?")
 
@@ -3616,6 +4809,11 @@ class LibraryDialog(QtWidgets.QDialog):
         if not paths:
             self._info("Select files in the list.")
             return
+        if g == FAV_GROUP:
+            self.lib.set_favorite(paths, False)
+            self._save()
+            self._fill_groups(select=g)
+            return
         extra = "\nFiles will be removed from ALL groups." if g == ALL_GROUP else ""
         r = QtWidgets.QMessageBox.question(
             self, "Remove from group",
@@ -3668,6 +4866,13 @@ class LibraryDialog(QtWidgets.QDialog):
                 try:
                     if make_thumb(p, self.lib.thumb_ev):
                         done += 1
+                        if path_key(p) not in self.lib.auto_light:      # теги освещения — сразу при создании превью
+                            try:
+                                cls, _how = detect_light(p, True)
+                                if cls:
+                                    self.lib.set_auto_light(p, cls, False)
+                            except Exception:
+                                print("[SkyRig Studio] light detect error for %s:\n%s" % (p, traceback.format_exc()))
                 except Exception:
                     print("[SkyRig Studio] thumb error for %s:\n%s" % (p, traceback.format_exc()))
             self.progress.setValue(100 if not self._cancel else self.progress.value())
@@ -3677,6 +4882,9 @@ class LibraryDialog(QtWidgets.QDialog):
             self._busy = False
             self.b_thumbs.setEnabled(True)
             self.b_cancel.setEnabled(False)
+        if done:
+            self._save(force_backup=True)              # новые превью и теги освещения -> сразу в бэкап
+            self._fill_tag_filter()
         self._fill_files()
 
     # ---------- ambientCG ----------
@@ -3887,20 +5095,6 @@ class LibraryDialog(QtWidgets.QDialog):
         if failed:
             msg += ". Failed: %d" % failed
         self._info(msg)
-
-    def _delete_thumbs(self):
-        paths = self._selected_paths()
-        if not paths:
-            self._info("Select files in the list.")
-            return
-        r = QtWidgets.QMessageBox.question(
-            self, "Delete previews",
-            "Delete previews of the selected files (%d)?\nHDRI files on disk are not deleted." % len(paths))
-        if r != QtWidgets.QMessageBox.Yes:
-            return
-        n = sum(delete_thumbs(p) for p in paths)
-        self._fill_files()
-        self._info("Preview cache files deleted: %d. To create them again, use the “Create previews” button." % n)
 
     def _on_ev_changed(self, v):
         """Новая экспозиция превью: пересчёт из кэша .lin (Max не нужен, быстро)."""
@@ -5396,8 +6590,23 @@ class SafeEnvironment(QtWidgets.QWidget):
         if not self._run("apply HDRI", do):
             return False
         self.sync_from_scene()
-        if self.chk_link.isChecked() and find_sun() is not None:
-            self._align_impl(create_if_missing=False, quiet=True)
+        sun_note = ""
+        if find_sun() is not None:
+            if self.chk_link.isChecked():
+                self._align_impl(create_if_missing=False, quiet=True)
+            elif getattr(self.lib, "sun_auto_align", True):
+                # солнце сразу по новой карте: положение берётся из кэша («Detect sun…» в библиотеке) или ищется
+                # один раз; карты без явного солнца (пасмурно, ночь) солнце не двигают
+                try:
+                    pt = self._hdri_sun_point(path)
+                except Exception:
+                    print("[SkyRig Studio] find brightest error:\n" + traceback.format_exc())
+                    pt = None
+                if pt is not None and pt[2] >= SUN_MIN_PEAK:
+                    if self._align_impl(create_if_missing=False, quiet=True):
+                        sun_note = " Sun aligned with the HDRI."
+                elif pt is not None:
+                    sun_note = " No distinct sun on this map: the sun was not moved."
         note = ""
         corr = self._corr_ev(path)
         if auto_exposure and (not prev_path or path_key(prev_path) != path_key(path)):
@@ -5406,7 +6615,7 @@ class SafeEnvironment(QtWidgets.QWidget):
             if abs(corr) >= 0.005:
                 note += ", brightness balancing %+.2f EV applied" % corr
             note += "."
-        self._status("Applied: %s.%s" % (os.path.basename(path), note))
+        self._status("Applied: %s.%s%s" % (os.path.basename(path), note, sun_note))
         return True
 
     def _set_exposure(self, ev):
