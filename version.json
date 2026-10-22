@@ -1,10 +1,10 @@
 {
   "version": "0.74",
   "file": "releases/skyrig_studio_v0.74.py",
-  "sha256": "5cd921c06cd4f1512574db0defdde326492e71f76918e98222fa5f00b71dce23",
-  "date": "2026-10-21",
+  "sha256": "97a3a763a215c774013e13cb543f4fb5cabf33d11a552f118354bf7443f1a35e",
+  "date": "2026-10-22",
   "notes": [
-    "Maps without a distinct sun (night, overcast, dusk) no longer move the sun when switched with Prev/Next or rotated with the link on; “link to HDRI” asks first",
+    "Maps without a distinct sun (night, overcast, dusk) no longer move the sun when switched with Prev/Next or rotated with the link on; “link to HDRI” places it without asking and notes it in the status line",
     "Horizon line switch in HDRI settings: shows the horizon in the camera of the current view (Corona Camera, Physical, Target/Free Camera)"
   ]
 }

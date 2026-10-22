@@ -1,7 +1,7 @@
 # История версий
 
 ## v0.74 — 2026-10-21
-- Maps without a distinct sun (night, overcast, dusk) no longer move the sun when switched with Prev/Next or rotated with the link on; “link to HDRI” asks first
+- Maps without a distinct sun (night, overcast, dusk) no longer move the sun when switched with Prev/Next or rotated with the link on; “link to HDRI” places it without asking and notes it in the status line
 - Horizon line switch in HDRI settings: shows the horizon in the camera of the current view (Corona Camera, Physical, Target/Free Camera)
 
 ## v0.73 — 2026-10-21
