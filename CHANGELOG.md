@@ -1,5 +1,9 @@
 # История версий
 
+## v0.76 — 2026-10-25
+- Dates in the window (e.g. the auto-backup status) are always in English and no longer follow the Windows language
+- README: credits for Poly Haven and ambientCG, the HDRI sources
+
 ## v0.75 — 2026-10-25
 - The sun follows HDRI rotation reliably: the “Link azimuth to HDRI” state is saved in the scene, and on maps without a distinct sun the sun turns together with the map
 - Your own map in a Direct / Reflect / Refract override slot is no longer replaced silently: when you change that EV, the script asks first

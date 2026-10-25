@@ -56,7 +56,7 @@ Without the link the sun stays where you put it; you can click "link to HDRI" ag
 - Windows. Internet access is needed for updates and map downloads (the script itself works offline).
 
 ## Installation
-1. Download [`dist/SkyRigStudio_v0.75.mzp`](https://github.com/lamer486/SkyRigStudio/raw/main/dist/SkyRigStudio_v0.75.mzp).
+1. Download [`dist/SkyRigStudio_v0.76.mzp`](https://github.com/lamer486/SkyRigStudio/raw/main/dist/SkyRigStudio_v0.76.mzp).
 2. Drag the file into the 3ds Max window (any viewport). The installer copies the script and creates a macro.
 3. Put the button on a toolbar: **Customize → Customize User Interface → Toolbars** (or Menus / Quads) →
    category **SkyRig Studio** → drag "SkyRig Studio" onto a toolbar. Launch the script with that button.
@@ -107,6 +107,9 @@ The library stores **full paths** to HDRIs, so on another computer it starts emp
 The script only connects: (1) once a day to `raw.githubusercontent.com` for the version number (can be turned off),
 (2) on your command — to `ambientcg.com` and `polyhaven.com` for the catalog and maps (CC0 license), (3) on the "Update" button —
 for the new script file. No data about you or your scene is sent anywhere.
+
+**HDRI sources.** Map catalogs and downloads are powered by [Poly Haven](https://polyhaven.com) and [ambientCG](https://ambientcg.com) —
+thank you! All their maps are CC0. The script identifies itself to their APIs as `SkyRigStudio/<version>`.
 
 ## Support the author
 Script created with the help of Claude AI by Vasiliy Kanevskiy, 2026. If it saves you time: [♥ Donate via PayPal](https://paypal.me/Vkanevskiy).
@@ -170,7 +173,7 @@ HDRI, находит самую яркую точку (солнце на кар�
 - Windows. Для обновлений и загрузки карт — доступ в интернет (сам скрипт работает и без него).
 
 ## Установка
-1. Скачайте [`dist/SkyRigStudio_v0.75.mzp`](https://github.com/lamer486/SkyRigStudio/raw/main/dist/SkyRigStudio_v0.75.mzp).
+1. Скачайте [`dist/SkyRigStudio_v0.76.mzp`](https://github.com/lamer486/SkyRigStudio/raw/main/dist/SkyRigStudio_v0.76.mzp).
 2. Перетащите файл мышью в окно 3ds Max (в любой вьюпорт). Установщик скопирует скрипт и создаст кнопку.
 3. Выведите кнопку на панель: **Customize → Customize User Interface → Toolbars** (или Menus / Quads) →
    категория **SkyRig Studio** → перетащите «SkyRig Studio» на панель. Запуск — по этой кнопке.
@@ -202,6 +205,9 @@ HDRI, находит самую яркую точку (солнце на кар�
 Скрипт обращается в сеть только: (1) раз в сутки к `raw.githubusercontent.com` за номером версии (можно выключить),
 (2) по вашей команде — к `ambientcg.com` и `polyhaven.com` за каталогом и картами (лицензия CC0), (3) по кнопке «Обновить» —
 за новым файлом скрипта. Никаких данных о вас или сцене не отправляется.
+
+**Источники HDRI.** Каталоги и загрузка карт работают благодаря [Poly Haven](https://polyhaven.com) и [ambientCG](https://ambientcg.com) —
+спасибо им! Все их карты под лицензией CC0. В запросах к их API скрипт представляется как `SkyRigStudio/<версия>`.
 
 ---
 

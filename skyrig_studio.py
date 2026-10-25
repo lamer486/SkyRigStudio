@@ -52,7 +52,7 @@ import pymxs
 from PySide6 import QtWidgets, QtCore, QtGui
 import qtmax
 
-VERSION = "0.75"
+VERSION = "0.76"
 WINDOW_TITLE = "SkyRig Studio v" + VERSION
 COPYRIGHT_TEXT = "Script created with the help of Claude AI by Vasiliy Kanevskiy, 2026."
 CONTACT_EMAIL = "kanevskiy.vasiliy@gmail.com"
@@ -3680,7 +3680,9 @@ def _fmt_when(ts):
         return "today " + time.strftime("%H:%M", t)
     if t.tm_year == now.tm_year and t.tm_yday == now.tm_yday - 1:
         return "yesterday " + time.strftime("%H:%M", t)
-    return time.strftime("%b %d, %H:%M", t)
+    # месяц — своими английскими названиями: %b берёт язык Windows (иврит, русский…), а интерфейс только английский
+    month = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")[t.tm_mon - 1]
+    return "%s %d, %02d:%02d" % (month, t.tm_mday, t.tm_hour, t.tm_min)
 
 
 def backup_status_text(lib):

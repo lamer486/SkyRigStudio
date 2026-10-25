@@ -1,13 +1,10 @@
 {
-  "version": "0.75",
-  "file": "releases/skyrig_studio_v0.75.py",
-  "sha256": "da3068683575189faa5650334e419a61d199bee88f83bf2164918433a6b2ae0f",
+  "version": "0.76",
+  "file": "releases/skyrig_studio_v0.76.py",
+  "sha256": "6a5ba2f7ad2beb953bad68a6391c9611e7a14cf05bcc190933e4627a7860e0a1",
   "date": "2026-10-25",
   "notes": [
-    "The sun follows HDRI rotation reliably: the “Link azimuth to HDRI” state is saved in the scene, and on maps without a distinct sun the sun turns together with the map",
-    "Your own map in a Direct / Reflect / Refract override slot is no longer replaced silently: when you change that EV, the script asks first",
-    "Horizon angle and the Horizon line switch share one row; Blur and Horizon rows are aligned",
-    "Fixed the up-down cursor getting stuck over the window after dragging spinner arrows",
-    "Behance and Instagram buttons next to Donate"
+    "Dates in the window (e.g. the auto-backup status) are always in English and no longer follow the Windows language",
+    "README: credits for Poly Haven and ambientCG, the HDRI sources"
   ]
 }
