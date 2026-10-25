@@ -52,12 +52,14 @@ import pymxs
 from PySide6 import QtWidgets, QtCore, QtGui
 import qtmax
 
-VERSION = "0.74"
+VERSION = "0.75"
 WINDOW_TITLE = "SkyRig Studio v" + VERSION
 COPYRIGHT_TEXT = "Script created with the help of Claude AI by Vasiliy Kanevskiy, 2026."
 CONTACT_EMAIL = "kanevskiy.vasiliy@gmail.com"
 DONATE_URL = "https://paypal.me/Vkanevskiy"
 DONATE_TEXT_BTN = "♥ Donate"
+SOCIAL_LINKS = (("Behance", "https://www.behance.net/vasiliykanevskiy", "Author's portfolio on Behance"),
+                ("Instagram", "https://www.instagram.com/vasiliykanevskiy/", "Author's Instagram"))
 WINDOW_OBJ_NAME = "SafeEnvironmentWindow"
 DOCK_OBJ_NAME = "SafeEnvironmentDock"
 LIBRARY_OBJ_NAME = "SafeEnvironmentLibrary"
@@ -1726,21 +1728,38 @@ def channel_ev(kind, ch, name):
     return 0.0
 
 
-def set_channel_ev(kind, ch, name, ev, main_cc):
-    """True — готово; False — в канале чужая карта (не тронута); None — нет цели (нет активной CoronaCam)."""
+def foreign_channel_map(kind, ch, name):
+    """Имя пользовательской карты в слоте override (не нашей), иначе None. Флаг override не важен:
+    карта пользователя может лежать в слоте и при выключенной галочке."""
+    t = _target_obj(kind)
+    if t is None:
+        return None
+    _f_on, f_map, _f_use = _ch_attrs(kind, ch)
+    try:
+        cur = getattr(t, f_map)
+    except Exception:
+        return None
+    if cur is None or _our_cc(cur, name) is not None:
+        return None
+    return str(cur.name)
+
+
+def set_channel_ev(kind, ch, name, ev, main_cc, replace=False):
+    """True — готово; False — в канале чужая карта (не тронута); None — нет цели (нет активной CoronaCam).
+    replace=True — чужая карта заменяется нашей (только с согласия пользователя)."""
     t = _target_obj(kind)
     if t is None:
         return None if abs(ev) >= 1e-6 else True
     f_on, f_map, f_use = _ch_attrs(kind, ch)
     cur = getattr(t, f_map)
     ours = _our_cc(cur, name)
-    foreign = cur is not None and ours is None and bool(getattr(t, f_on))
+    foreign = cur is not None and ours is None
     if abs(ev) < 1e-6:
         if ours is not None:
             setattr(t, f_on, False)
             setattr(t, f_map, None)
         return True
-    if foreign:
+    if foreign and not replace:
         return False
     cc2 = ours
     if cc2 is None:
@@ -1819,6 +1838,29 @@ def ensure_target(node):
     t = node.target
     if t is not None:
         t.pos = rt.point3(0, 0, 0)
+
+
+SUN_LINK_PROP = "SkyRigLinkAzimuth"
+
+
+def get_sun_link(node):
+    """Состояние «Link azimuth to HDRI», сохранённое в свойствах солнца. None — в сцене не записано."""
+    try:
+        v = rt.getUserProp(node, SUN_LINK_PROP)
+    except Exception:
+        return None
+    if v is None or v == rt.undefined:
+        return None
+    if isinstance(v, str):
+        return v.strip().lower() in ("true", "1", "yes")
+    return bool(v)
+
+
+def set_sun_link(node, on):
+    try:
+        rt.setUserProp(node, SUN_LINK_PROP, bool(on))
+    except Exception:
+        print("[SkyRig Studio] cannot store link state:\n" + traceback.format_exc())
 
 
 def set_sun_direction(node, elevation, azimuth, distance=None):
@@ -2224,7 +2266,9 @@ class MaxSpinBox(QtWidgets.QDoubleSpinBox):
                 e.accept()
                 return
             self._dragging = True
-            QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.SizeVerCursor)
+            # курсор только на самом поле (мышь им захвачена, пока кнопка зажата); общий для приложения
+            # override-курсор оставался «вверх-вниз», если отпускание мыши до поля не доходило
+            self.setCursor(QtCore.Qt.SizeVerCursor)
         mods = e.modifiers()
         mult = 1.0
         if mods & QtCore.Qt.ControlModifier:
@@ -2240,13 +2284,22 @@ class MaxSpinBox(QtWidgets.QDoubleSpinBox):
             super().mouseReleaseEvent(e)
             return
         was_drag = self._dragging
-        self._arrow_press = False
-        self._dragging = False
-        if was_drag:
-            QtWidgets.QApplication.restoreOverrideCursor()
-        elif e.button() == QtCore.Qt.LeftButton:
+        self._end_drag()
+        if not was_drag and e.button() == QtCore.Qt.LeftButton:
             self.stepBy(1 if self._zone == "up" else -1)     # обычный клик = один шаг
         e.accept()
+
+    def _end_drag(self):
+        if self._dragging:
+            self.unsetCursor()
+        self._arrow_press = False
+        self._dragging = False
+
+    def event(self, e):
+        # мышь отобрали (диалог, Max), окно скрыто или потерян фокус — перетаскивание закончено
+        if e.type() in (QtCore.QEvent.UngrabMouse, QtCore.QEvent.Hide, QtCore.QEvent.FocusOut) and self._arrow_press:
+            self._end_drag()
+        return super().event(e)
 
     def keyPressEvent(self, e):
         if e.key() in (QtCore.Qt.Key_Return, QtCore.Qt.Key_Enter):
@@ -5531,6 +5584,15 @@ class SafeEnvironment(QtWidgets.QWidget):
         self._preview_base = None
         self._shown_key = None
         self._last_horizon = 0.0
+        self._last_rot = 0.0
+        self._last_ch_ev = (0.0, 0.0, 0.0)   # Direct / Reflect / Refract EV после последней записи
+        self._kept_channels = []
+        # курсор «вверх-вниз», застрявший от прежних версий (перетаскивание стрелок спиннера)
+        for _i in range(20):
+            oc = QtWidgets.QApplication.overrideCursor()
+            if oc is None or oc.shape() != QtCore.Qt.SizeVerCursor:
+                break
+            QtWidgets.QApplication.restoreOverrideCursor()
         self._range_key = None
         self._range_stats = None
         self._hist = []              # состояния сцены, которыми управляет скрипт
@@ -6073,24 +6135,31 @@ class SafeEnvironment(QtWidgets.QWidget):
         f.addRow("Exposure", self.sp_exp)
         f.addRow("Gamma", self.sp_gamma)
         f.addRow("Saturation", self.sp_sat)
-        self.sp_blur.setFixedWidth(64)               # поле Blur короткое
+        # Blur и Horizon — одна сетка: поле одинаковой ширины слева, кнопка «min» и переключатель линии
+        # в одной колонке справа
+        SHORT_SPIN_W, ROW_GAP = 88, 8
+        self.sp_blur.setFixedWidth(SHORT_SPIN_W)
+        self.sp_horizon.setFixedWidth(SHORT_SPIN_W)
         b_blur_min = QtWidgets.QPushButton("min")
-        b_blur_min.setFixedWidth(34)
+        b_blur_min.setFixedWidth(40)
         b_blur_min.setToolTip("Blur = %s" % BLUR_MIN)
         b_blur_min.clicked.connect(lambda: self.sp_blur.setValue(BLUR_MIN))
-        row_blur = QtWidgets.QHBoxLayout()
-        row_blur.setContentsMargins(0, 0, 0, 0)
-        row_blur.addWidget(b_blur_min)
-        row_blur.addWidget(self.sp_blur)
-        row_blur.addStretch(1)
-        f.addRow("Blur", row_blur)
-        f.addRow("Horizon", self.sp_horizon)
         self.chk_hline = ToggleSwitch("Horizon line")
         self.chk_hline.setToolTip("Shows the horizon line (eye level) in the camera of the current view — the camera's own "
                                   "“Show Horizon” option, drawn over the geometry. With Horizon = 0 the HDRI horizon lies "
                                   "exactly on this line.")
         self.chk_hline.toggled.connect(self._on_hline)
-        f.addRow("", self.chk_hline)
+        rows = []
+        for label, spin, extra in (("Blur", self.sp_blur, b_blur_min), ("Horizon", self.sp_horizon, self.chk_hline)):
+            row = QtWidgets.QHBoxLayout()
+            row.setContentsMargins(0, 0, 0, 0)
+            row.setSpacing(ROW_GAP)
+            row.addWidget(spin)
+            row.addWidget(extra, 0, QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter)
+            row.addStretch(1)
+            f.addRow(label, row)
+            rows.append(row)
+        row_blur, row_hz = rows
         self.cmb_target = TargetCombo(self._refresh_target_label)
         self.cmb_target.addItem("Corona global settings", TARGET_RENDERER)
         self.cmb_target.addItem("Active CoronaCam", TARGET_CAMERA)
@@ -6169,7 +6238,7 @@ class SafeEnvironment(QtWidgets.QWidget):
                                  "so that it stays on the bright point of the map.\n"
                                  "Off by default; turns on by itself after the “link to HDRI” button.")
         self.chk_link.setChecked(False)                    # по умолчанию выключено; кнопка «link to HDRI» включает
-        self.chk_link.toggled.connect(lambda *_: self._refresh_state())
+        self.chk_link.toggled.connect(self._on_link_toggled)
         sl.addWidget(self.chk_link)
         root.addWidget(gs)
 
@@ -6278,6 +6347,10 @@ class SafeEnvironment(QtWidgets.QWidget):
         self.lbl_mail.setOpenExternalLinks(True)
         self.lbl_mail.setStyleSheet("color: #8a8a8a; font-size: 8pt;")
         root.addWidget(self.lbl_mail)
+        # нижняя строка: Donate + ссылки на соцсети автора (открываются в браузере)
+        row_links = QtWidgets.QHBoxLayout()
+        row_links.setContentsMargins(0, 0, 0, 0)
+        row_links.setSpacing(6)
         if DONATE_URL:
             bd = QtWidgets.QPushButton(DONATE_TEXT_BTN)
             bd.setMinimumHeight(28)
@@ -6285,13 +6358,21 @@ class SafeEnvironment(QtWidgets.QWidget):
             bd.setCursor(QtCore.Qt.PointingHandCursor)
             bd.setToolTip("Support the author via PayPal (opens in the browser)")
             bd.clicked.connect(lambda: QtGui.QDesktopServices.openUrl(QtCore.QUrl(DONATE_URL)))
-            root.addWidget(bd)
+            row_links.addWidget(bd, 1)
+        for text, url, tip in SOCIAL_LINKS:
+            bl = QtWidgets.QPushButton(text)
+            bl.setMinimumHeight(28)
+            bl.setCursor(QtCore.Qt.PointingHandCursor)
+            bl.setToolTip("%s (opens in the browser)" % tip)
+            bl.clicked.connect(lambda _=False, u=url: QtGui.QDesktopServices.openUrl(QtCore.QUrl(u)))
+            row_links.addWidget(bl, 1)
+        root.addLayout(row_links)
         try:
             self.setStyleSheet(UI_QSS)                      # оформление v0.52 (только это окно)
         except Exception:
             pass
         # элементы, которые прячутся в режиме «Просто» (значения при этом сохраняются и продолжают действовать)
-        self._adv_items = [(f, self.sp_gamma), (f, self.sp_sat), (f, row_blur), (f, self.sp_horizon),
+        self._adv_items = [(f, self.sp_gamma), (f, self.sp_sat), (f, row_blur), (f, row_hz),
                            (f, self.cmb_target), (f, self.sp_cam), (f, self.sp_refl), (f, self.sp_refr),
                            (fs, self.sp_size), (fs, self.sp_dist), (fs, self.sp_icon)]
         self._adv_widgets = [b_pexp, b_pimp, b_pscene, self._card_compass]
@@ -6660,6 +6741,8 @@ class SafeEnvironment(QtWidgets.QWidget):
                 if pt is not None and pt[2] >= SUN_MIN_PEAK:
                     if self._align_impl(create_if_missing=False, quiet=True):
                         sun_note = " Sun aligned with the HDRI."
+                        self.chk_link.setChecked(True)   # дальше солнце следует за поворотом карты
+                        set_sun_link(find_sun(), True)
                 elif pt is not None:
                     sun_note = " No distinct sun on this map: the sun was not moved."
         note = ""
@@ -6730,7 +6813,7 @@ class SafeEnvironment(QtWidgets.QWidget):
         return float(off) if off is not None else 0.0
 
     def _write_hdri(self, rotation, exposure, gamma, saturation, blur=BLUR_DEFAULT, horizon=0.0,
-                    cam_ev=0.0, refl_ev=0.0, refr_ev=0.0):
+                    cam_ev=0.0, refl_ev=0.0, refr_ev=0.0, replace=()):
         adopt_legacy()
         _cc, bm, _o = get_chain()
         if bm is None:
@@ -6745,7 +6828,7 @@ class SafeEnvironment(QtWidgets.QWidget):
         skipped = []
         no_cam = False
         for (ch, name), ev in zip(CHANNELS, (cam_ev, refl_ev, refr_ev)):
-            res = set_channel_ev(kind, ch, name, float(ev), cc)
+            res = set_channel_ev(kind, ch, name, float(ev), cc, replace=ch in replace)
             if res is None:
                 no_cam = True
             elif not res:
@@ -6798,8 +6881,11 @@ class SafeEnvironment(QtWidgets.QWidget):
         vals = self._hdri_values()
         alog("  HDRI " + " ".join("%s=%.3g" % (k, v) for k, v in vals.items() if isinstance(v, (int, float))))
         self._skipped_channels = []
+        self._kept_channels = []
         self._no_cam = False
+        vals["replace"] = self._ask_replace_overrides(vals)
         res = self._run("HDRI settings", lambda: self._write_hdri(**vals))
+        self._last_ch_ev = (vals["cam_ev"], vals["refl_ev"], vals["refr_ev"])
         if res is False:
             self._status("Apply the HDRI first (click a preview).")
             return
@@ -6807,15 +6893,88 @@ class SafeEnvironment(QtWidgets.QWidget):
         # при сдвиге горизонта меняется и высота
         if res and self.chk_link.isChecked() and find_sun() is not None:
             moved = abs(vals["horizon"] - self._last_horizon) > 1e-6
-            self._align_impl(create_if_missing=False, quiet=True, azimuth_only=not moved)
+            self._sun_skip_note = ""
+            ok = self._align_impl(create_if_missing=False, quiet=True, azimuth_only=not moved)
+            if not ok and self._sun_skip_note:
+                # карта без явного солнца: яркой точке не верим, но солнце поворачивается вместе с картой
+                self._turn_sun_with_map(vals["rotation"] - self._last_rot)
         self._last_horizon = vals["horizon"]
+        self._last_rot = vals["rotation"]
         if self._no_cam:
             self._status("The active view is not a CoronaCam: Direct/Reflect/Refract EV were not written for the camera.", error=True)
             return
+        if self._kept_channels:
+            self._status("Your own map in the %s override slot was kept." % ", ".join(self._kept_channels))
+            return
         if self._skipped_channels:
-            self._status("The %s channels already hold someone else's map: left untouched." % ", ".join(self._skipped_channels), error=True)
+            self._status("The %s override slots hold your own map: left untouched. Change the EV to replace it."
+                         % ", ".join(self._skipped_channels), error=True)
             return
         self._refresh_state()
+
+    def _ask_replace_overrides(self, vals):
+        """Пользователь меняет Direct/Reflect/Refract EV, а в этом слоте override лежит его собственная карта:
+        спрашиваем, заменить ли её текущей HDRI. Нет — карта не трогается, значение EV возвращается назад.
+        Возвращает множество каналов, где замена разрешена. vals правится на месте."""
+        allowed = set()
+        if get_chain()[1] is None:
+            return allowed
+        kind = self.lib.channel_target
+        spins = (self.sp_cam, self.sp_refl, self.sp_refr)
+        keys = ("cam_ev", "refl_ev", "refr_ev")
+        where = ("camera “%s”" % active_camera_name()) if kind == TARGET_CAMERA else "Render Setup (Scene Environment)"
+        for i, (ch, name) in enumerate(CHANNELS):
+            ev, prev = float(vals[keys[i]]), float(self._last_ch_ev[i])
+            if abs(ev - prev) < 1e-6 or abs(ev) < 1e-6:
+                continue                                  # этот канал пользователь сейчас не менял
+            own = foreign_channel_map(kind, ch, name)
+            if not own:
+                continue
+            box = QtWidgets.QMessageBox(self)
+            box.setIcon(QtWidgets.QMessageBox.Question)
+            box.setWindowTitle("%s override" % ch)
+            box.setText("The %s override slot in %s holds your own map “%s”.\n\n"
+                        "Replace it with the current HDRI to apply %s EV?" % (ch, where, own, ch))
+            b_yes = box.addButton("Replace", QtWidgets.QMessageBox.AcceptRole)
+            box.addButton("Keep my map", QtWidgets.QMessageBox.RejectRole)
+            box.exec()
+            if box.clickedButton() is b_yes:
+                allowed.add(ch)
+            else:
+                self._loading = True
+                spins[i].setValue(prev)
+                self._loading = False
+                vals[keys[i]] = prev
+                self._kept_channels.append(ch)
+        return allowed
+
+    def _on_link_toggled(self, on):
+        if not self._loading:
+            s = find_sun()
+            if s is not None:
+                set_sun_link(s, on)
+        self._refresh_state()
+
+    def _turn_sun_with_map(self, d_rot):
+        """Поворачивает солнце по азимуту на столько же, на сколько повернули карту (высота прежняя)."""
+        if abs(d_rot) < 1e-6:
+            return
+        s = find_sun()
+        if s is None:
+            return
+        z = s.transform.row3
+        el, az = angles_from_z((float(z.x), float(z.y), float(z.z)))
+        new_az = (az - d_rot) % 360.0
+
+        def do():
+            set_sun_direction(s, el, new_az)
+            return True
+
+        if self._run("turn sun with HDRI", do):
+            self._loading = True
+            self.sp_azim.setValue(new_az)
+            self._loading = False
+            self._status("No distinct sun on this map: the sun turns together with the map.")
 
     # ---------- линия горизонта ----------
     def _on_hline(self, on):
@@ -7063,6 +7222,8 @@ class SafeEnvironment(QtWidgets.QWidget):
         """Кнопка «link to HDRI»: совмещает солнце с яркой точкой и включает привязку азимута к HDRI."""
         if self._align_impl(create_if_missing=True, quiet=False, force_search=True):
             self.chk_link.setChecked(True)
+            if find_sun() is not None:
+                set_sun_link(find_sun(), True)
 
     @undoable("Link sun to HDRI")
     def _align_impl(self, create_if_missing, quiet, azimuth_only=False, force_search=False):
@@ -7491,6 +7652,7 @@ class SafeEnvironment(QtWidgets.QWidget):
                 self.lbl_current.setText(os.path.basename(path) or "—")   # диапазон EV — ниже, после превью
                 rot = float(bm.uAngle)
                 self.sp_rot.setValue(rot)
+                self._last_rot = rot
                 try:
                     self.sp_blur.setValue(float(bm.filteringBlur))
                 except Exception:
@@ -7503,6 +7665,7 @@ class SafeEnvironment(QtWidgets.QWidget):
                         sp.setValue(channel_ev(self.lib.channel_target, ch, name))
                     except Exception:
                         pass
+                self._last_ch_ev = (self.sp_cam.value(), self.sp_refl.value(), self.sp_refr.value())
                 self.sl_rot.setValue(rot_to_slider(rot))
                 if cc is not None:
                     ev_, g_, sat_ = cc_read(cc)
@@ -7529,6 +7692,9 @@ class SafeEnvironment(QtWidgets.QWidget):
                 ic = find_icon()
                 self.sp_icon.setValue(units_to_m(float(ic.size)) if ic is not None else ICON_SIZE_DEFAULT)
                 self.chk_on.setChecked(bool(s.on))
+                link = get_sun_link(s)
+                if link is not None:
+                    self.chk_link.setChecked(link)          # привязка хранится в сцене и переживает переоткрытие окна
         except Exception:
             print("[SkyRig Studio] sync error:\n" + traceback.format_exc())
         finally:

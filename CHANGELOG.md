@@ -1,5 +1,12 @@
 # История версий
 
+## v0.75 — 2026-10-25
+- The sun follows HDRI rotation reliably: the “Link azimuth to HDRI” state is saved in the scene, and on maps without a distinct sun the sun turns together with the map
+- Your own map in a Direct / Reflect / Refract override slot is no longer replaced silently: when you change that EV, the script asks first
+- Horizon angle and the Horizon line switch share one row; Blur and Horizon rows are aligned
+- Fixed the up-down cursor getting stuck over the window after dragging spinner arrows
+- Behance and Instagram buttons next to Donate
+
 ## v0.74 — 2026-10-21
 - Maps without a distinct sun (night, overcast, dusk) no longer move the sun when switched with Prev/Next or rotated with the link on; “link to HDRI” places it without asking and notes it in the status line
 - Horizon line switch in HDRI settings: shows the horizon in the camera of the current view (Corona Camera, Physical, Target/Free Camera)

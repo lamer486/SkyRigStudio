@@ -56,7 +56,7 @@ Without the link the sun stays where you put it; you can click "link to HDRI" ag
 - Windows. Internet access is needed for updates and map downloads (the script itself works offline).
 
 ## Installation
-1. Download [`dist/SkyRigStudio_v0.74.mzp`](https://github.com/lamer486/SkyRigStudio/raw/main/dist/SkyRigStudio_v0.74.mzp).
+1. Download [`dist/SkyRigStudio_v0.75.mzp`](https://github.com/lamer486/SkyRigStudio/raw/main/dist/SkyRigStudio_v0.75.mzp).
 2. Drag the file into the 3ds Max window (any viewport). The installer copies the script and creates a macro.
 3. Put the button on a toolbar: **Customize → Customize User Interface → Toolbars** (or Menus / Quads) →
    category **SkyRig Studio** → drag "SkyRig Studio" onto a toolbar. Launch the script with that button.
@@ -170,7 +170,7 @@ HDRI, находит самую яркую точку (солнце на кар�
 - Windows. Для обновлений и загрузки карт — доступ в интернет (сам скрипт работает и без него).
 
 ## Установка
-1. Скачайте [`dist/SkyRigStudio_v0.74.mzp`](https://github.com/lamer486/SkyRigStudio/raw/main/dist/SkyRigStudio_v0.74.mzp).
+1. Скачайте [`dist/SkyRigStudio_v0.75.mzp`](https://github.com/lamer486/SkyRigStudio/raw/main/dist/SkyRigStudio_v0.75.mzp).
 2. Перетащите файл мышью в окно 3ds Max (в любой вьюпорт). Установщик скопирует скрипт и создаст кнопку.
 3. Выведите кнопку на панель: **Customize → Customize User Interface → Toolbars** (или Menus / Quads) →
    категория **SkyRig Studio** → перетащите «SkyRig Studio» на панель. Запуск — по этой кнопке.
