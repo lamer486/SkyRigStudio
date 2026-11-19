@@ -1,14 +1,11 @@
 {
-  "version": "0.77",
-  "file": "releases/skyrig_studio_v0.77.py",
-  "sha256": "e7934401536bdba6b1f76308a7be6589fd91efb0be90e7bded471cca2df6c7c9",
+  "version": "0.78",
+  "file": "releases/skyrig_studio_v0.78.py",
+  "sha256": "85d5089cac42e50ce57a5fba6f13be658c95b24d8597323172efdbd19c293a2e",
   "date": "2026-11-19",
   "notes": [
-    "Corona Sky mode: switch between an HDRI and the procedural Corona Sky; the sky follows the Corona Sun (Intensity, Turbidity, clouds, Morning / Noon / Evening / Sunset); the last HDRI and its settings are remembered in the scene; presets remember the mode",
-    "Sun search finds the brightest spot instead of the brightest pixel: sunsets behind clouds no longer lock onto a street lamp or a window",
-    "Prev / Next keep the Exposure you set",
-    "Click anywhere on the Rotation slider to jump to that angle",
-    "The library window closes after Apply to scene / double-click",
-    "Downloading a map that is already in the library asks first: skip, download again, keep both resolutions or replace"
+    "Corona Sky: Exposure and Direct / Reflect / Refract EV, like the HDRI settings (the sky goes through a Color Correct; the EV channels use the same target as HDRI, shown in Expert mode)",
+    "Switching between HDRI and Corona Sky moves the EV channels with it and restores the sky's Exposure and EV; presets remember them",
+    "Scenes from 0.77 with a bare Corona Sky get the Color Correct on the first edit"
   ]
 }

@@ -52,7 +52,7 @@ import pymxs
 from PySide6 import QtWidgets, QtCore, QtGui
 import qtmax
 
-VERSION = "0.77"
+VERSION = "0.78"
 WINDOW_TITLE = "SkyRig Studio v" + VERSION
 COPYRIGHT_TEXT = "Script created with the help of Claude AI by Vasiliy Kanevskiy, 2026."
 CONTACT_EMAIL = "kanevskiy.vasiliy@gmail.com"
@@ -1690,14 +1690,38 @@ FILEPROP_HDRI = "SkyRigStudio_HDRI"      # последняя HDRI и её на�
 FILEPROP_SKY = "SkyRigStudio_Sky"        # настройки неба (для возврата в режим Corona Sky)
 
 
+SKY_CC_NAME = "EnvSkyCC"                # наш CoronaColorCorrect над небом: Exposure и источник для EV-каналов
+SKY_EXTRA = dict(exposure=0.0, cam_ev=0.0, refl_ev=0.0, refr_ev=0.0)
+
+
 def _our_sky(m):
     return m if (m is not None and _class_name(m) == "CoronaSky" and str(m.name) == SKY_NAME) else None
 
 
+def _our_sky_cc(m):
+    if m is not None and _class_name(m) == "CoronaColorCorrect" and str(m.name) == SKY_CC_NAME:
+        try:
+            if _our_sky(cc_input(m)) is not None:
+                return m
+        except Exception:
+            pass
+    return None
+
+
+def get_sky_chain():
+    """(CoronaColorCorrect | None, CoronaSky | None) в слоте Single map. В сценах v0.77 небо может стоять без коррекции."""
+    r = corona_renderer()
+    env = r.bg_texmap if r is not None else None
+    if _our_sky_cc(env) is not None:
+        return env, cc_input(env)
+    if _our_sky(env) is not None:
+        return None, env
+    return None, None
+
+
 def get_sky():
     """Наша CoronaSky в слоте Single map, иначе None."""
-    r = corona_renderer()
-    return _our_sky(r.bg_texmap) if r is not None else None
+    return get_sky_chain()[1]
 
 
 def _sky_cast(k, v):
@@ -1760,7 +1784,7 @@ def get_chain():
     ours = _our_chain(env)
     if ours:
         return ours[0], ours[1], None
-    if _our_sky(env) is not None:
+    if _our_sky(env) is not None or _our_sky_cc(env) is not None:
         return None, None, None           # режим Corona Sky: HDRI сейчас нет, но и чужой карты нет
     return None, None, "other"           # любая чужая карта (в т.ч. свой Color Correction / CoronaBitmap)
 
@@ -6481,7 +6505,10 @@ class SafeEnvironment(QtWidgets.QWidget):
         self.sp_sky_int.setToolTip("Corona Sky intensity multiplier: brightness of the sky.")
         self.sp_sky_turb = make_spin(1.7, 10, 0.1, 2, default=2.5)
         self.sp_sky_turb.setToolTip("Turbidity: haze in the air. 2 = very clear, 3-4 = typical, 6+ = hazy.")
+        self.sp_sky_exp = make_spin(-10, 10, 0.1, 2, " EV", default=0.0)
+        self.sp_sky_exp.setToolTip("Exposure of the whole sky (Color Correct over Corona Sky), like Exposure for an HDRI.")
         fk.addRow("Intensity", self.sp_sky_int)
+        fk.addRow("Exposure", self.sp_sky_exp)
         fk.addRow("Turbidity", self.sp_sky_turb)
         self.chk_clouds = ToggleSwitch("Clouds")
         self.chk_clouds.setToolTip("Procedural Corona Sky clouds.")
@@ -6501,8 +6528,24 @@ class SafeEnvironment(QtWidgets.QWidget):
         fk.addRow("Cloud variety", self.sp_cl_var)
         fk.addRow("Cirrus", self.sp_cl_cirrus)
         fk.addRow("Cloud seed", self.sp_cl_seed)
+        self.lbl_sky_target = QtWidgets.QLabel("")
+        self.lbl_sky_target.setWordWrap(True)
+        self.lbl_sky_target.setStyleSheet("color: #b0b0b0;")
+        self.lbl_sky_target.setToolTip("Where Direct / Reflect / Refract EV are written: the same setting as "
+                                       "“EV channels in” in HDRI settings.")
+        fk.addRow(self.lbl_sky_target)
+        self.sp_sky_cam = make_spin(-10, 10, 0.1, 2, " EV", default=0.0)
+        self.sp_sky_cam.setToolTip("Brightness of the sky the camera sees, relative to the main exposure. 0 = no separate adjustment.")
+        self.sp_sky_refl = make_spin(-10, 10, 0.1, 2, " EV", default=0.0)
+        self.sp_sky_refl.setToolTip("Brightness of the sky in reflections, relative to the main exposure. 0 = no separate adjustment.")
+        self.sp_sky_refr = make_spin(-10, 10, 0.1, 2, " EV", default=0.0)
+        self.sp_sky_refr.setToolTip("Brightness of the sky in refractions, relative to the main exposure. 0 = no separate adjustment.")
+        fk.addRow("Direct EV", self.sp_sky_cam)
+        fk.addRow("Reflect EV", self.sp_sky_refl)
+        fk.addRow("Refract EV", self.sp_sky_refr)
+        self._fk = fk
         for w_ in (self.sp_sky_int, self.sp_sky_turb, self.sp_cl_amount, self.sp_cl_var, self.sp_cl_cirrus,
-                   self.sp_cl_seed):
+                   self.sp_cl_seed, self.sp_sky_exp, self.sp_sky_cam, self.sp_sky_refl, self.sp_sky_refr):
             w_.valueChanged.connect(self._on_sky_setting)
         self.chk_clouds.toggled.connect(self._on_sky_setting)
         root.addWidget(gk)
@@ -6704,7 +6747,9 @@ class SafeEnvironment(QtWidgets.QWidget):
         # элементы, которые прячутся в режиме «Просто» (значения при этом сохраняются и продолжают действовать)
         self._adv_items = [(f, self.sp_gamma), (f, self.sp_sat), (f, row_blur), (f, row_hz),
                            (f, self.cmb_target), (f, self.sp_cam), (f, self.sp_refl), (f, self.sp_refr),
-                           (fs, self.sp_size), (fs, self.sp_dist), (fs, self.sp_icon)]
+                           (fs, self.sp_size), (fs, self.sp_dist), (fs, self.sp_icon),
+                           (self._fk, self.lbl_sky_target), (self._fk, self.sp_sky_cam),
+                           (self._fk, self.sp_sky_refl), (self._fk, self.sp_sky_refr)]
         self._adv_widgets = [b_pexp, b_pimp, b_pscene, self._card_compass]
         self._apply_mode()
         self._apply_env_ui()
@@ -6735,10 +6780,53 @@ class SafeEnvironment(QtWidgets.QWidget):
             d["path"] = path
             scene_prop_set(FILEPROP_HDRI, d)
 
+    def _sky_state(self):
+        """Параметры неба из сцены: CoronaSky + Exposure коррекции + EV-каналы."""
+        cc, sky = get_sky_chain()
+        if sky is None:
+            return None
+        d = sky_read(sky)
+        d.update(SKY_EXTRA)
+        if cc is not None:
+            try:
+                d["exposure"] = float(cc_read(cc)[0])
+            except Exception:
+                pass
+            kind = self.lib.channel_target
+            for key, (ch, name) in zip(("cam_ev", "refl_ev", "refr_ev"), CHANNELS):
+                try:
+                    d[key] = float(channel_ev(kind, ch, name))
+                except Exception:
+                    pass
+        return d
+
     def _store_sky_state(self, sky=None):
-        sky = sky or get_sky()
-        if sky is not None:
-            scene_prop_set(FILEPROP_SKY, sky_read(sky))
+        d = self._sky_state()
+        if d is not None:
+            scene_prop_set(FILEPROP_SKY, d)
+
+    def _write_sky(self, d):
+        """Пишет параметры неба: карта CoronaSky, Exposure коррекции над ней и Direct/Reflect/Refract EV.
+        Небо без коррекции (сцены v0.77) получает её здесь же. Вызывается внутри _run."""
+        cc, sky = get_sky_chain()
+        if sky is None:
+            return False
+        sky_write(sky, d)
+        if cc is None:
+            cc = rt.CoronaColorCorrect()
+            cc.name = SKY_CC_NAME
+            cc_set_input(cc, sky)
+            set_single_map(cc)
+        cc_write(cc, float(d.get("exposure", 0.0)), 1.0, 100.0)
+        kind = self.lib.channel_target
+        clear_channels(keep_kind=kind)
+        skipped = []
+        for key, (ch, name) in zip(("cam_ev", "refl_ev", "refr_ev"), CHANNELS):
+            res = set_channel_ev(kind, ch, name, float(d.get(key, 0.0)), cc)
+            if res is False:
+                skipped.append(ch)
+        self._skipped_channels = skipped
+        return True
 
     @undoable("Sky source")
     def set_env_mode(self, mode):
@@ -6763,13 +6851,13 @@ class SafeEnvironment(QtWidgets.QWidget):
             if find_sun() is None:
                 self.create_sun()
             st = dict(SKY_DEFAULTS)
+            st.update(SKY_EXTRA)
             st.update(scene_prop_get(FILEPROP_SKY) or {})
 
             def do():
                 clear_channels()                       # наши Direct/Reflect/Refract ссылались на HDRI
                 sky = rt.CoronaSky()
                 sky.name = SKY_NAME
-                sky_write(sky, st)
                 s = find_sun()
                 if s is not None:
                     s.on = True
@@ -6777,8 +6865,11 @@ class SafeEnvironment(QtWidgets.QWidget):
                         sky.selectedSun = s
                     except Exception:
                         pass
-                set_single_map(sky)
-                return True
+                cc = rt.CoronaColorCorrect()
+                cc.name = SKY_CC_NAME
+                cc_set_input(cc, sky)
+                set_single_map(cc)
+                return self._write_sky(st)
 
             if self._run("Corona Sky", do):
                 self.sync_from_scene()
@@ -6805,7 +6896,8 @@ class SafeEnvironment(QtWidgets.QWidget):
         if sky is not None:
             def clear():
                 r = corona_renderer()
-                if r is not None and _our_sky(r.bg_texmap) is not None:
+                if r is not None and (_our_sky(r.bg_texmap) is not None or _our_sky_cc(r.bg_texmap) is not None):
+                    clear_channels()
                     r.bg_texmap = None
                 return True
             self._run("remove Corona Sky", clear)
@@ -6824,8 +6916,14 @@ class SafeEnvironment(QtWidgets.QWidget):
         d = dict(intensity=self.sp_sky_int.value(), turbidity=self.sp_sky_turb.value(),
                  clouds=self.chk_clouds.isChecked(), clouds_amount=self.sp_cl_amount.value(),
                  clouds_variety=self.sp_cl_var.value(), clouds_cirrus=self.sp_cl_cirrus.value(),
-                 clouds_seed=int(self.sp_cl_seed.value()))
-        self._run("Corona Sky", lambda: (sky_write(sky, d), True)[1])
+                 clouds_seed=int(self.sp_cl_seed.value()), exposure=self.sp_sky_exp.value(),
+                 cam_ev=self.sp_sky_cam.value(), refl_ev=self.sp_sky_refl.value(), refr_ev=self.sp_sky_refr.value())
+        self._skipped_channels = []
+        self._run("Corona Sky", lambda: self._write_sky(d))
+        if self._skipped_channels:
+            self._status("The %s override slots hold your own map: left untouched." % ", ".join(self._skipped_channels),
+                         error=True)
+            return
         self._refresh_state()
 
     def _sky_time(self, elevation):
@@ -7164,6 +7262,7 @@ class SafeEnvironment(QtWidgets.QWidget):
         cc, bm, other = get_chain()
         if get_sky() is not None:
             self._store_sky_state()          # уходим из Corona Sky: кнопка «Corona Sky» вернёт эти настройки
+            self._run("clear sky EV channels", lambda: (clear_channels(), True)[1])   # они смотрели на небо
         if other:
             Msg = QtWidgets.QMessageBox
             r = Msg.question(
@@ -7520,7 +7619,7 @@ class SafeEnvironment(QtWidgets.QWidget):
             if r is not None:
                 clear_channels()
                 cur = r.bg_texmap
-                if cur is None or _our_chain(cur) is not None or _our_sky(cur) is not None:
+                if cur is None or _our_chain(cur) is not None or _our_sky(cur) is not None or _our_sky_cc(cur) is not None:
                     r.bg_texmap = None
                     r.bg_source = 0           # снова «3ds Max settings (Environment tab)»
                 else:
@@ -7778,7 +7877,7 @@ class SafeEnvironment(QtWidgets.QWidget):
         sky = get_sky()
         d["env"] = "sky" if sky is not None else "hdri"
         if sky is not None:
-            d["sky"] = sky_read(sky)
+            d["sky"] = self._sky_state()
         s = find_sun()
         d["sun"] = None if s is None else dict(
             on=self.chk_on.isChecked(), height=self.sp_elev.value(), azimuth=self.sp_azim.value(),
@@ -8023,8 +8122,9 @@ class SafeEnvironment(QtWidgets.QWidget):
                 notes.append("Corona Sky not applied")
             elif p.get("sky"):
                 st = dict(SKY_DEFAULTS)
+                st.update(SKY_EXTRA)
                 st.update(p["sky"])
-                self._run("preset Corona Sky", lambda: (sky_write(sky, st), True)[1])
+                self._run("preset Corona Sky", lambda: self._write_sky(st))
         else:
             if get_sky() is not None:
                 self._store_sky_state()               # кнопка «Corona Sky» вернёт эти настройки неба
@@ -8165,7 +8265,14 @@ class SafeEnvironment(QtWidgets.QWidget):
                 self.lbl_current.setText("—")
             sky = get_sky()
             if sky is not None:
-                d = sky_read(sky)
+                d = self._sky_state() or dict(SKY_DEFAULTS, **SKY_EXTRA)
+                self.sp_sky_exp.setValue(d["exposure"])
+                self.sp_sky_cam.setValue(d["cam_ev"])
+                self.sp_sky_refl.setValue(d["refl_ev"])
+                self.sp_sky_refr.setValue(d["refr_ev"])
+                self.lbl_sky_target.setText("EV channels in: " + (
+                    ("camera “%s”" % active_camera_name() if active_camera_name() else "active CoronaCam")
+                    if self.lib.channel_target == TARGET_CAMERA else "Corona global settings"))
                 self.sp_sky_int.setValue(d["intensity"])
                 self.sp_sky_turb.setValue(d["turbidity"])
                 self.chk_clouds.setChecked(d["clouds"])

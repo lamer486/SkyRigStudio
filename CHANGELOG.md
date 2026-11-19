@@ -1,5 +1,10 @@
 # История версий
 
+## v0.78 — 2026-11-19
+- Corona Sky: Exposure and Direct / Reflect / Refract EV, like the HDRI settings (the sky goes through a Color Correct; the EV channels use the same target as HDRI, shown in Expert mode)
+- Switching between HDRI and Corona Sky moves the EV channels with it and restores the sky's Exposure and EV; presets remember them
+- Scenes from 0.77 with a bare Corona Sky get the Color Correct on the first edit
+
 ## v0.77 — 2026-11-19
 - Corona Sky mode: switch between an HDRI and the procedural Corona Sky; the sky follows the Corona Sun (Intensity, Turbidity, clouds, Morning / Noon / Evening / Sunset); the last HDRI and its settings are remembered in the scene; presets remember the mode
 - Sun search finds the brightest spot instead of the brightest pixel: sunsets behind clouds no longer lock onto a street lamp or a window
