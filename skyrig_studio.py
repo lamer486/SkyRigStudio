@@ -52,7 +52,7 @@ import pymxs
 from PySide6 import QtWidgets, QtCore, QtGui
 import qtmax
 
-VERSION = "0.78"
+VERSION = "0.79"
 WINDOW_TITLE = "SkyRig Studio v" + VERSION
 COPYRIGHT_TEXT = "Script created with the help of Claude AI by Vasiliy Kanevskiy, 2026."
 CONTACT_EMAIL = "kanevskiy.vasiliy@gmail.com"
@@ -1973,6 +1973,45 @@ def find_sun():
     return first
 
 
+SUN_LAYER = "SkyRig Studio"
+
+
+def sun_visibility_fix(s):
+    """Скрытое солнце (само или на выключенном слое) Corona не рендерит. Показывает солнце и его цель;
+    со скрытого слоя переносит их на видимый слой «SkyRig Studio». Возвращает список сделанного."""
+    done = []
+    nodes = [s]
+    try:
+        if s.target is not None:
+            nodes.append(s.target)
+    except Exception:
+        pass
+    try:
+        lay = s.layer
+        if lay is not None and not bool(lay.on):
+            old = str(lay.name)
+            dst = rt.LayerManager.getLayerFromName(SUN_LAYER)
+            if dst is None:
+                dst = rt.LayerManager.newLayerFromName(SUN_LAYER)
+            dst.on = True
+            for n in nodes:
+                dst.addNode(n)
+            done.append("moved from the hidden layer “%s” to “%s”" % (old, SUN_LAYER))
+    except Exception:
+        print("[SkyRig Studio] sun layer:\n" + traceback.format_exc())
+    hidden = False
+    for n in nodes:
+        try:
+            if bool(n.isHidden):
+                n.isHidden = False
+                hidden = True
+        except Exception:
+            pass
+    if hidden:
+        done.append("unhidden")
+    return done
+
+
 def m_to_units(m):
     """Метры -> единицы сцены (сантиметры, дюймы и т. д. — как настроено в Max)."""
     try:
@@ -2112,6 +2151,41 @@ UI_ACCENT = "#e0902f"          # тёплый «солнечный» акцен�
 UI_ACCENT_HOVER = "#eda24a"
 UI_CARD_BG = "#3a3a3a"
 UI_CARD_BORDER = "#4d4d4d"
+
+
+def logo_pixmap(height, dpr=1.0):
+    """Фирменный знак SkyRig Studio (купол неба, горизонт, солнце) для тёмного фона.
+    Рисуется кодом по геометрии SRS_logo.svg (поле 256), без внешних файлов; чёткий на любом масштабе экрана."""
+    x0, y0, w, h = 36.0, 59.0, 184.0, 89.0           # рамка знака в координатах SVG
+    k = float(height) / h
+    pm = QtGui.QPixmap(int(round(w * k * dpr)), int(round(height * dpr)))
+    pm.setDevicePixelRatio(dpr)
+    pm.fill(QtCore.Qt.transparent)
+    p = QtGui.QPainter(pm)
+    p.setRenderHint(QtGui.QPainter.Antialiasing)
+    p.scale(k, k)
+    p.translate(-x0, -y0)
+
+    def pen(color, width):
+        pe = QtGui.QPen(QtGui.QColor(color), width)
+        pe.setCapStyle(QtCore.Qt.RoundCap)
+        return pe
+
+    p.setPen(pen("#7696c2", 12))
+    p.drawArc(QtCore.QRectF(56, 68, 144, 144), 0, 180 * 16)            # купол
+    p.setPen(pen("#eceae6", 12))
+    p.drawLine(QtCore.QPointF(44, 140), QtCore.QPointF(212, 140))     # горизонт
+    if height >= 18:                                                  # пунктир луча — только когда различим
+        p.setPen(QtCore.Qt.NoPen)
+        p.setBrush(QtGui.QColor("#e8952e"))
+        for t in (0.0, 0.26, 0.52, 0.78):
+            c = QtCore.QPointF(128 + 38 * t, 140 - 44 * t)
+            p.drawEllipse(c, 4.5, 4.5)
+    p.setPen(QtCore.Qt.NoPen)
+    p.setBrush(QtGui.QColor("#e8952e"))
+    p.drawEllipse(QtCore.QPointF(178, 83), 18, 18)                    # солнце
+    p.end()
+    return pm
 UI_BTN_BG = "#4a4a4a"
 UI_BTN_HOVER = "#585858"
 UI_BTN_PRESSED = "#3a3a3a"
@@ -6033,7 +6107,7 @@ class SafeEnvironment(QtWidgets.QWidget):
                 self.lbl_state.setStyleSheet("color: #e0b050;")
                 self.lbl_state.setText("Preset: “%s”. Settings were changed and not saved "
                                        "(“Update” overwrites it)." % name)
-            ok = self._link_ok()
+            ok = None if get_sky() is not None else self._link_ok()   # Corona Sky: привязки к HDRI нет
             uv = None
             if ok:
                 c = self.sun_cache.get(self._current_path())
@@ -6285,11 +6359,33 @@ class SafeEnvironment(QtWidgets.QWidget):
         root.setSpacing(4)
 
         # --- название скрипта и версия ---
-        self.lbl_title = QtWidgets.QLabel("SkyRig Studio  v" + VERSION)
-        self.lbl_title.setAlignment(QtCore.Qt.AlignCenter)
-        self.lbl_title.setStyleSheet("font-weight: bold; font-size: 11pt; color: #f0f0f0; "
-                                     "padding: 4px; border-bottom: 2px solid %s;" % UI_ACCENT)
-        root.addWidget(self.lbl_title)
+        hdr = QtWidgets.QFrame()
+        hdr.setObjectName("srsHeader")
+        hdr.setStyleSheet("QFrame#srsHeader { border-bottom: 2px solid %s; }" % UI_ACCENT)
+        hl = QtWidgets.QHBoxLayout(hdr)
+        hl.setContentsMargins(4, 3, 4, 4)
+        hl.setSpacing(6)
+        self.lbl_logo = QtWidgets.QLabel()
+        try:
+            dpr = float(self.devicePixelRatioF()) or 1.0
+        except Exception:
+            dpr = 1.0
+        try:
+            self.lbl_logo.setPixmap(logo_pixmap(18, max(dpr, 2.0)))
+        except Exception:
+            print("[SkyRig Studio] logo:\n" + traceback.format_exc())
+        self.lbl_title = QtWidgets.QLabel("SkyRig Studio  <span style='color:#9a9a9a; font-weight:normal; "
+                                          "font-size:9pt;'>v%s</span>" % VERSION)
+        self.lbl_title.setStyleSheet("font-weight: bold; font-size: 11pt; color: #f0f0f0;")
+        hl.addStretch(1)
+        hl.addWidget(self.lbl_logo, 0, QtCore.Qt.AlignVCenter)
+        hl.addWidget(self.lbl_title, 0, QtCore.Qt.AlignVCenter)
+        hl.addStretch(1)
+        root.addWidget(hdr)
+        try:
+            self.setWindowIcon(QtGui.QIcon(logo_pixmap(32, 2.0)))
+        except Exception:
+            pass
 
         # --- режим интерфейса: Просто / Расширенный ---
         mr = QtWidgets.QHBoxLayout()
@@ -6548,6 +6644,8 @@ class SafeEnvironment(QtWidgets.QWidget):
                    self.sp_cl_seed, self.sp_sky_exp, self.sp_sky_cam, self.sp_sky_refl, self.sp_sky_refr):
             w_.valueChanged.connect(self._on_sky_setting)
         self.chk_clouds.toggled.connect(self._on_sky_setting)
+        self.chk_clouds.toggled.connect(self._show_cloud_rows)
+        self._show_cloud_rows(self.chk_clouds.isChecked())
         root.addWidget(gk)
 
         # --- солнце ---
@@ -6755,6 +6853,16 @@ class SafeEnvironment(QtWidgets.QWidget):
         self._apply_env_ui()
 
     # ---------- источник неба: HDRI / Corona Sky ----------
+    def _show_cloud_rows(self, on=None):
+        """Параметры облаков (и «New clouds») видны только при включённом переключателе Clouds."""
+        on = self.chk_clouds.isChecked() if on is None else bool(on)
+        try:
+            for w_ in (self.sp_cl_amount, self.sp_cl_var, self.sp_cl_cirrus, self.sp_cl_seed):
+                self._fk.setRowVisible(w_, on)
+            self.b_new_clouds.setVisible(on)
+        except Exception:
+            print("[SkyRig Studio] cloud rows:\n" + traceback.format_exc())
+
     def _apply_env_ui(self):
         """Показывает то, что относится к текущему источнику неба (режим читается из сцены)."""
         sky = get_sky() is not None
@@ -7661,8 +7769,14 @@ class SafeEnvironment(QtWidgets.QWidget):
     # ---------- солнце ----------
     @undoable("Sun creation")
     def create_sun(self):
-        if find_sun() is not None:
-            self._status("There is already a sun in the scene; not creating a second one.")
+        old = find_sun()
+        if old is not None:
+            fixed = self._run("show sun", lambda: sun_visibility_fix(old)) or []
+            self.sync_from_scene()
+            if fixed:
+                self._status("The sun “%s” was hidden and did not render: %s." % (old.name, ", ".join(fixed)))
+            else:
+                self._status("There is already a sun in the scene (“%s”); not creating a second one." % old.name)
             return
 
         def do():
@@ -7671,10 +7785,12 @@ class SafeEnvironment(QtWidgets.QWidget):
             s.pos = rt.point3(0, 0, 0)
             set_sun_direction(s, 35.0, 180.0, m_to_units(SUN_DIST_DEFAULT))
             ensure_icon(s, m_to_units(ICON_SIZE_DEFAULT))
-            return True
+            return sun_visibility_fix(s) or True      # активный слой может быть скрыт
 
-        if self._run("create sun", do):
-            self._status("Sun created: the target is at the scene center (0, 0, 0).")
+        res = self._run("create sun", do)
+        if res:
+            note = (" Current layer is hidden: the sun is on the layer “%s”." % SUN_LAYER) if isinstance(res, list) else ""
+            self._status("Sun created: the target is at the scene center (0, 0, 0)." + note)
             self.sync_from_scene()
             if self.chk_link.isChecked() and self._current_path():
                 self._align_impl(create_if_missing=False, quiet=True)   # сразу на яркую точку HDRI

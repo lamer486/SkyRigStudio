@@ -1,11 +1,12 @@
 {
-  "version": "0.78",
-  "file": "releases/skyrig_studio_v0.78.py",
-  "sha256": "85d5089cac42e50ce57a5fba6f13be658c95b24d8597323172efdbd19c293a2e",
+  "version": "0.79",
+  "file": "releases/skyrig_studio_v0.79.py",
+  "sha256": "436e11735df2fa2256456eb4bdfa20e316ff6b6e210f2072c92b25cafffe6ea4",
   "date": "2026-11-19",
   "notes": [
-    "Corona Sky: Exposure and Direct / Reflect / Refract EV, like the HDRI settings (the sky goes through a Color Correct; the EV channels use the same target as HDRI, shown in Expert mode)",
-    "Switching between HDRI and Corona Sky moves the EV channels with it and restores the sky's Exposure and EV; presets remember them",
-    "Scenes from 0.77 with a bare Corona Sky get the Color Correct on the first edit"
+    "“Create at center” finds a sun that is hidden (or on a hidden layer) and shows it; a new sun goes to a visible layer “SkyRig Studio” when the current layer is hidden",
+    "Corona Sky: cloud parameters and “New clouds” appear only when Clouds is on",
+    "Corona Sky: no more “sun is not linked to the brightest point of the HDRI” warning",
+    "Small SkyRig Studio logo in the window header"
   ]
 }

@@ -1,5 +1,11 @@
 # История версий
 
+## v0.79 — 2026-11-19
+- “Create at center” finds a sun that is hidden (or on a hidden layer) and shows it; a new sun goes to a visible layer “SkyRig Studio” when the current layer is hidden
+- Corona Sky: cloud parameters and “New clouds” appear only when Clouds is on
+- Corona Sky: no more “sun is not linked to the brightest point of the HDRI” warning
+- Small SkyRig Studio logo in the window header
+
 ## v0.78 — 2026-11-19
 - Corona Sky: Exposure and Direct / Reflect / Refract EV, like the HDRI settings (the sky goes through a Color Correct; the EV channels use the same target as HDRI, shown in Expert mode)
 - Switching between HDRI and Corona Sky moves the EV channels with it and restores the sky's Exposure and EV; presets remember them
