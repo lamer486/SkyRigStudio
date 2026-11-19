@@ -25,6 +25,8 @@ Without the link the sun stays where you put it; you can click "link to HDRI" ag
 - **Map controls** — rotation, Exposure, Gamma, Saturation, Blur, Horizon, separate Direct / Reflect / Refract EV,
   "Prev / Next" map switching (with the link on, the sun jumps to the bright point of the new map). The EV channels can target
   the global Corona settings or the active CoronaCam (shown by name).
+- **Corona Sky mode** — switch between an HDRI and the procedural Corona Sky: the sky follows the Corona Sun,
+  with Intensity, Turbidity, clouds and Morning / Noon / Evening / Sunset buttons. The last HDRI is remembered in the scene.
 - **Brightness balancing** — brings maps to one lighting level relative to a reference map, so the light doesn't "jump" when you switch HDRIs.
 - **Presets** — the whole lighting setup (map, parameters, sun); the active camera name is suggested when saving.
 - **Free map downloads** — ambientCG and Poly Haven (CC0), resolution choice, file integrity checks.
@@ -56,7 +58,7 @@ Without the link the sun stays where you put it; you can click "link to HDRI" ag
 - Windows. Internet access is needed for updates and map downloads (the script itself works offline).
 
 ## Installation
-1. Download [`dist/SkyRigStudio_v0.76.mzp`](https://github.com/lamer486/SkyRigStudio/raw/main/dist/SkyRigStudio_v0.76.mzp).
+1. Download [`dist/SkyRigStudio_v0.77.mzp`](https://github.com/lamer486/SkyRigStudio/raw/main/dist/SkyRigStudio_v0.77.mzp).
 2. Drag the file into the 3ds Max window (any viewport). The installer copies the script and creates a macro.
 3. Put the button on a toolbar: **Customize → Customize User Interface → Toolbars** (or Menus / Quads) →
    category **SkyRig Studio** → drag "SkyRig Studio" onto a toolbar. Launch the script with that button.
@@ -143,6 +145,8 @@ HDRI, находит самую яркую точку (солнце на кар�
 - **Библиотека HDRI** — группы, теги, поиск, превью, подпись с разрешением (например, `[8k]`), автоопределение типа освещения.
 - **Управление картой** — поворот, Exposure, Gamma, Saturation, Blur, Horizon, отдельные EV для Direct / Reflect / Refract,
   переключение карт «Prev / Next» (при включённой привязке солнце переставляется на яркую точку новой карты).
+- **Режим Corona Sky** — переключение между HDRI и процедурным небом Corona Sky: небо следует за Corona Sun,
+  есть Intensity, Turbidity, облака и кнопки Morning / Noon / Evening / Sunset. Последняя HDRI запоминается в сцене.
 - **Выравнивание яркости** — приводит карты к единому уровню освещённости по эталонной, чтобы при смене HDRI свет не «прыгал».
 - **Пресеты** — освещение целиком (карта, параметры, солнце); при сохранении подставляется имя активной камеры.
 - **Загрузка карт из интернета** — ambientCG и Poly Haven (лицензия CC0), выбор разрешения, проверка целостности файлов.
@@ -173,7 +177,7 @@ HDRI, находит самую яркую точку (солнце на кар�
 - Windows. Для обновлений и загрузки карт — доступ в интернет (сам скрипт работает и без него).
 
 ## Установка
-1. Скачайте [`dist/SkyRigStudio_v0.76.mzp`](https://github.com/lamer486/SkyRigStudio/raw/main/dist/SkyRigStudio_v0.76.mzp).
+1. Скачайте [`dist/SkyRigStudio_v0.77.mzp`](https://github.com/lamer486/SkyRigStudio/raw/main/dist/SkyRigStudio_v0.77.mzp).
 2. Перетащите файл мышью в окно 3ds Max (в любой вьюпорт). Установщик скопирует скрипт и создаст кнопку.
 3. Выведите кнопку на панель: **Customize → Customize User Interface → Toolbars** (или Menus / Quads) →
    категория **SkyRig Studio** → перетащите «SkyRig Studio» на панель. Запуск — по этой кнопке.

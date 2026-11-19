@@ -1,5 +1,13 @@
 # История версий
 
+## v0.77 — 2026-11-19
+- Corona Sky mode: switch between an HDRI and the procedural Corona Sky; the sky follows the Corona Sun (Intensity, Turbidity, clouds, Morning / Noon / Evening / Sunset); the last HDRI and its settings are remembered in the scene; presets remember the mode
+- Sun search finds the brightest spot instead of the brightest pixel: sunsets behind clouds no longer lock onto a street lamp or a window
+- Prev / Next keep the Exposure you set
+- Click anywhere on the Rotation slider to jump to that angle
+- The library window closes after Apply to scene / double-click
+- Downloading a map that is already in the library asks first: skip, download again, keep both resolutions or replace
+
 ## v0.76 — 2026-10-25
 - Dates in the window (e.g. the auto-backup status) are always in English and no longer follow the Windows language
 - README: credits for Poly Haven and ambientCG, the HDRI sources

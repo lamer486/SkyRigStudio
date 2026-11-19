@@ -52,7 +52,7 @@ import pymxs
 from PySide6 import QtWidgets, QtCore, QtGui
 import qtmax
 
-VERSION = "0.76"
+VERSION = "0.77"
 WINDOW_TITLE = "SkyRig Studio v" + VERSION
 COPYRIGHT_TEXT = "Script created with the help of Claude AI by Vasiliy Kanevskiy, 2026."
 CONTACT_EMAIL = "kanevskiy.vasiliy@gmail.com"
@@ -816,10 +816,12 @@ class SunCache:
             c = self.sun.pop(file_signature(p), None)
             if c is not None:
                 self.sun[k] = c
+        if c is not None and int(c.get("a", 1)) < SUN_ALGO:
+            return None                               # найдено прежним поиском (самый яркий пиксель) -> ищем заново
         return c
 
     def put(self, p, u, v, peak):
-        self.sun[self._key(p)] = {"u": u, "v": v, "peak": peak}
+        self.sun[self._key(p)] = {"u": u, "v": v, "peak": peak, "a": SUN_ALGO}
         if len(self.sun) > 2000:                      # не растём бесконечно
             for k in list(self.sun.keys())[:500]:
                 self.sun.pop(k, None)
@@ -1085,20 +1087,29 @@ FINDSUN_OPEN_MXS = r"""
 )
 """
 
-# Просмотр полос строк уменьшенной копии: возвращает [лучшая яркость, x, y]
+# Просмотр полос строк уменьшенной копии: [лучшая яркость, x, y, первая строка сетки, строк сетки, суммы яркости...]
+# Попутно яркость складывается в грубую сетку (ячейка @CELL@x@CELL@ пикселей), по ней потом ищется самое яркое ПЯТНО.
 FINDSUN_SCAN_MXS = r"""
 (
  local bestL = -1.0, bpx = 0, bpy = 0
- local sw = SE_small.width
+ local sw = SE_small.width, cell = @CELL@, gw = @GW@
+ local cy0 = (@Y0@ / cell) as integer, cy1 = (@Y1@ / cell) as integer
+ local nr = cy1 - cy0 + 1
+ local sums = #()
+ sums[nr * gw] = 0.0
+ for i = 1 to sums.count do sums[i] = 0.0
  for y = @Y0@ to @Y1@ do (
   local row = getPixels SE_small [0,y] sw
+  local base = ((y / cell) as integer - cy0) * gw
   for x = 1 to sw do (
    local c = row[x]
    local l = c.r*0.2126 + c.g*0.7152 + c.b*0.0722
    if l > bestL then (bestL = l; bpx = x-1; bpy = y)
+   local k = base + ((x-1) / cell) as integer + 1
+   sums[k] += l
   )
  )
- [bestL, bpx, bpy]
+ join #(bestL, bpx, bpy, cy0, nr) sums
 )
 """
 
@@ -1182,10 +1193,49 @@ THUMB_MXS = r"""
 """
 
 
+SUN_SPOT_RADIUS_DEG = 4.0              # радиус «пятна», в котором суммируется свет при поиске солнца
+SUN_ALGO = 2                          # версия поиска: 2 — самое яркое пятно (v0.77); записи кэша старее пересчитываются
+
+
+def _brightest_spot(grid, gw, gh, radius_deg=SUN_SPOT_RADIUS_DEG):
+    """Ячейка (cx, cy) с наибольшей суммой света в круге radius_deg вокруг неё (с учётом сжатия ячеек к полюсам).
+    Огромное зарево заката или яркое солнце выигрывают у точечного фонаря или окна."""
+    cell_deg = 360.0 / gw
+    rc = max(1, int(math.ceil(radius_deg / cell_deg)))
+    w_lat = [max(0.0, math.cos(math.radians(90.0 - (cy + 0.5) * 180.0 / gh))) for cy in range(gh)]
+    # сначала по строкам: сумма в окне по горизонтали (с переходом через шов карты), потом круг по вертикали
+    offs = []
+    for dy in range(-rc, rc + 1):
+        dx = int(math.floor(math.sqrt(max(0.0, rc * rc - dy * dy))))
+        offs.append((dy, dx))
+    pref = []
+    for cy in range(gh):
+        row = grid[cy]
+        acc, pr = 0.0, [0.0]
+        for v in row + row + row:
+            acc += v
+            pr.append(acc)
+        pref.append(pr)
+    best, bx, by = -1.0, 0, 0
+    for cy in range(gh):
+        for cx in range(gw):
+            e = 0.0
+            for dy, dx in offs:
+                y = cy + dy
+                if y < 0 or y >= gh:
+                    continue
+                pr = pref[y]
+                e += (pr[gw + cx + dx + 1] - pr[gw + cx - dx]) * w_lat[y]
+            if e > best:
+                best, bx, by = e, cx, cy
+    return bx, by
+
+
 def find_brightest(path, progress=None):
-    """(u, v, peak) или None (None и при отмене). Поиск идёт этапами, чтобы можно было
-    показывать прогресс: progress(percent, text) -> False отменяет поиск.
-    Временные глобальные переменные Max (SE_bm, SE_small) всегда освобождаются."""
+    """(u, v, peak) или None (None и при отмене). v0.77: ищется не самый яркий пиксель, а самое яркое ПЯТНО
+    (свет суммируется в круге SUN_SPOT_RADIUS_DEG): иначе на закатах и в сумерках фонарь или окно
+    оказывались ярче солнца за облаками. Потом центр уточняется в полном разрешении.
+    progress(percent, text) -> False отменяет поиск. Временные глобальные переменные Max всегда освобождаются."""
     def report(pc, text):
         if progress is None:
             return True
@@ -1198,26 +1248,46 @@ def find_brightest(path, progress=None):
         if info is None:
             return None
         w, h, sw, sh = int(info[0]), int(info[1]), int(info[2]), int(info[3])
-        if not report(15, "Looking for the brightest point..."):
+        cell = max(1, int(round(sw / 256.0)))
+        gw, gh = (sw + cell - 1) // cell, (sh + cell - 1) // cell
+        grid = [[0.0] * gw for _ in range(gh)]
+        if not report(15, "Looking for the sun..."):
             return None
-        best, bpx, bpy = -1.0, 0, 0
         strip = 64
         y = 0
         while y < sh:
             y1 = min(sh - 1, y + strip - 1)
-            r = rt.execute(FINDSUN_SCAN_MXS.replace("@Y0@", str(y)).replace("@Y1@", str(y1)))
-            if float(r[0]) > best:
-                best, bpx, bpy = float(r[0]), int(r[1]), int(r[2])
+            r = rt.execute(FINDSUN_SCAN_MXS.replace("@Y0@", str(y)).replace("@Y1@", str(y1))
+                           .replace("@CELL@", str(cell)).replace("@GW@", str(gw)))
+            cy0, nr = int(r[3]), int(r[4])
+            vals = list(r)[5:]
+            for ry in range(nr):
+                gy = cy0 + ry
+                if 0 <= gy < gh:
+                    row = grid[gy]
+                    off = ry * gw
+                    for gx in range(gw):
+                        row[gx] += float(vals[off + gx])
             y = y1 + 1
-            if not report(15 + int(55 * y / sh), "Looking for the brightest point..."):
+            if not report(15 + int(50 * y / sh), "Looking for the sun..."):
                 return None
+        # суммы -> средняя яркость ячейки (крайние ячейки могут быть неполными)
+        for gy in range(gh):
+            ch = min(cell, sh - gy * cell)
+            row = grid[gy]
+            for gx in range(gw):
+                row[gx] /= float(ch * min(cell, sw - gx * cell))
+        if not report(68, "Looking for the sun..."):
+            return None
+        bx, by = _brightest_spot(grid, gw, gh)
         scx, scy = w / float(sw), h / float(sh)
-        cx, cy = int((bpx + 0.5) * scx), int((bpy + 0.5) * scy)
-        R = int(max(scx, scy) * 3.0 + 14)
+        cx, cy = int((bx + 0.5) * cell * scx), int((by + 0.5) * cell * scy)
+        # окно уточнения: радиус пятна в пикселях полного разрешения (не меньше прежнего окна вокруг пика)
+        R = int(max(w * SUN_SPOT_RADIUS_DEG / 360.0, max(scx, scy) * 3.0 + 14))
         px = py = 0.0
         peak = 0.0
         for it in range(4):
-            if not report(70 + it * 7, "Refining position (%d of 4)..." % (it + 1)):
+            if not report(72 + it * 7, "Refining position (%d of 4)..." % (it + 1)):
                 return None
             r = rt.execute(FINDSUN_REFINE_MXS.replace("@CX@", str(cx)).replace("@CY@", str(cy))
                            .replace("@R@", str(R)))
@@ -1610,6 +1680,72 @@ def _our_chain(m):
     return None
 
 
+SKY_NAME = "EnvSky"                     # наша карта CoronaSky в слоте Single map
+SKY_DEFAULTS = dict(intensity=1.0, turbidity=2.5, clouds=False, clouds_amount=0.5, clouds_variety=0.5,
+                    clouds_cirrus=0.5, clouds_seed=0)
+SKY_ATTRS = dict(intensity="intensityMultiplier", turbidity="turbidity", clouds="cloudsEnable",
+                 clouds_amount="cloudsAmount", clouds_variety="cloudsVariety", clouds_cirrus="cloudsCirrusAmount",
+                 clouds_seed="cloudsSeed")
+FILEPROP_HDRI = "SkyRigStudio_HDRI"      # последняя HDRI и её настройки (для возврата из режима Corona Sky)
+FILEPROP_SKY = "SkyRigStudio_Sky"        # настройки неба (для возврата в режим Corona Sky)
+
+
+def _our_sky(m):
+    return m if (m is not None and _class_name(m) == "CoronaSky" and str(m.name) == SKY_NAME) else None
+
+
+def get_sky():
+    """Наша CoronaSky в слоте Single map, иначе None."""
+    r = corona_renderer()
+    return _our_sky(r.bg_texmap) if r is not None else None
+
+
+def _sky_cast(k, v):
+    dv = SKY_DEFAULTS[k]
+    if isinstance(dv, bool):
+        return bool(v)
+    if isinstance(dv, int):
+        return int(round(float(v)))
+    return float(v)
+
+
+def sky_read(sky):
+    d = dict(SKY_DEFAULTS)
+    for k, a in SKY_ATTRS.items():
+        try:
+            d[k] = _sky_cast(k, getattr(sky, a))
+        except Exception:
+            pass
+    return d
+
+
+def sky_write(sky, d):
+    for k, a in SKY_ATTRS.items():
+        if k in d:
+            try:
+                setattr(sky, a, _sky_cast(k, d[k]))
+            except Exception:
+                print("[SkyRig Studio] Corona Sky: cannot set %s" % a)
+
+
+def scene_prop_get(key):
+    """JSON из пользовательских свойств файла сцены (File > File Properties > Custom) или None."""
+    try:
+        i = rt.fileProperties.findProperty(rt.Name("custom"), key)
+        if i and int(i) > 0:
+            return json.loads(str(rt.fileProperties.getPropertyValue(rt.Name("custom"), i)))
+    except Exception:
+        pass
+    return None
+
+
+def scene_prop_set(key, value):
+    try:
+        rt.fileProperties.addProperty(rt.Name("custom"), key, json.dumps(value))
+    except Exception:
+        print("[SkyRig Studio] cannot store %s in the scene:\n%s" % (key, traceback.format_exc()))
+
+
 def get_chain():
     """(Color_Correction | None, CoronaBitmap | None, "other" | None).
     Читает слот Scene Environment -> Single map у Corona. Если он пуст, а в слоте Environment
@@ -1624,6 +1760,8 @@ def get_chain():
     ours = _our_chain(env)
     if ours:
         return ours[0], ours[1], None
+    if _our_sky(env) is not None:
+        return None, None, None           # режим Corona Sky: HDRI сейчас нет, но и чужой карты нет
     return None, None, "other"           # любая чужая карта (в т.ч. свой Color Correction / CoronaBitmap)
 
 
@@ -2199,6 +2337,28 @@ class ClickableLabel(QtWidgets.QLabel):
         super().mouseReleaseEvent(e)
 
 
+class JumpSlider(QtWidgets.QSlider):
+    """Ползунок, который по клику в любом месте дорожки сразу встаёт в эту точку (значение применяется сразу),
+    а дальше его можно тянуть, не отпуская кнопку. Обычный QSlider по клику мимо кружка лишь шагает на страницу."""
+
+    def mousePressEvent(self, e):
+        if e.button() == QtCore.Qt.LeftButton and self.orientation() == QtCore.Qt.Horizontal:
+            opt = QtWidgets.QStyleOptionSlider()
+            self.initStyleOption(opt)
+            st = self.style()
+            handle = st.subControlRect(QtWidgets.QStyle.CC_Slider, opt, QtWidgets.QStyle.SC_SliderHandle, self)
+            pos = e.position().toPoint() if hasattr(e, "position") else e.pos()
+            if not handle.contains(pos):
+                groove = st.subControlRect(QtWidgets.QStyle.CC_Slider, opt, QtWidgets.QStyle.SC_SliderGroove, self)
+                hw = handle.width()
+                span = max(1, groove.width() - hw)
+                x = pos.x() - groove.x() - hw // 2
+                v = QtWidgets.QStyle.sliderValueFromPosition(self.minimum(), self.maximum(),
+                                                             max(0, min(span, x)), span, opt.upsideDown)
+                self.setValue(v)                  # valueChanged -> карта поворачивается сразу
+        super().mousePressEvent(e)              # кружок теперь под курсором: можно сразу тянуть
+
+
 class MaxSpinBox(QtWidgets.QDoubleSpinBox):
     """Спиннер как в 3ds Max: зажать стрелки справа и плавно вести мышь вверх (больше) или
     вниз (меньше). Ctrl — быстрее (x10), Alt — точнее (x0.1). Короткий клик по стрелке — один шаг.
@@ -2734,6 +2894,7 @@ class AmbientCGDialog(QtWidgets.QDialog):
 
     SITE = ACG_SITE
     TITLE = "Download HDRIs from ambientCG"
+    NAME_RE = r"^(?P<id>.+?)_(?P<res>\d+K)_HDR\.exr$"      # имя скачанного файла: <id>_<res>_HDR.exr
     INFO = "CC0 license: free to use, including in commercial projects. Source: ambientcg.com"
     CATS = ACG_CATS
     FOLDER_ATTR, RES_ATTR = "acg_folder", "acg_res"
@@ -3241,6 +3402,81 @@ class AmbientCGDialog(QtWidgets.QDialog):
         self.lbl_sel.setText(txt)
 
     # ---------- загрузка ----------
+    def _lib_versions(self, a):
+        """Версии этой карты, уже лежащие в библиотеке: [(путь, разрешение), ...]."""
+        out = []
+        for p in self.lib.files_of(ALL_GROUP):
+            m = re.match(self.NAME_RE, os.path.basename(p), re.I)
+            if m and m.group("id").casefold() == a["id"].casefold():
+                out.append((p, m.group("res").upper()))
+        return out
+
+    def _resolve_existing(self, plan):
+        """Карты, которые уже есть в библиотеке: спрашиваем, что делать. Возвращает {id: (решение, [старые пути])}
+        или None (отмена). Решения: skip, replace (та же карта заново), keep (добавить новое разрешение),
+        swap (новое разрешение вместо старого)."""
+        dec, same_all, other_all = {}, None, None
+        for a, res, _url, _size in plan:
+            have = self._lib_versions(a)
+            if not have:
+                continue
+            olds = [p for p, _r in have]
+            same = [p for p, r in have if r == res.upper()]
+            if same and same_all:
+                dec[a["id"]] = (same_all, olds)
+                continue
+            if not same and other_all:
+                dec[a["id"]] = (other_all, olds)
+                continue
+            box = QtWidgets.QMessageBox(self)
+            box.setIcon(QtWidgets.QMessageBox.Question)
+            box.setWindowTitle("Already in the library")
+            chk = QtWidgets.QCheckBox("Do the same for the other maps")
+            box.setCheckBox(chk)
+            if same:
+                box.setText("“%s” %s is already downloaded and is in your library." % (a["title"], res))
+                box.setInformativeText("Download it again and replace the file?")
+                b_rep = box.addButton("Download again and replace", QtWidgets.QMessageBox.DestructiveRole)
+                b_skip = box.addButton("Skip", QtWidgets.QMessageBox.RejectRole)
+                choices = {b_rep: "replace", b_skip: "skip"}
+            else:
+                olds_res = ", ".join(sorted({r for _p, r in have}))
+                box.setText("“%s” is already in your library in %s. You chose %s." % (a["title"], olds_res, res))
+                box.setInformativeText("Keep both resolutions or replace %s with %s in the library?\n"
+                                       "The old file stays on disk." % (olds_res, res))
+                b_keep = box.addButton("Download %s, keep %s" % (res, olds_res), QtWidgets.QMessageBox.AcceptRole)
+                b_swap = box.addButton("Download %s, replace %s" % (res, olds_res), QtWidgets.QMessageBox.AcceptRole)
+                b_skip = box.addButton("Skip", QtWidgets.QMessageBox.RejectRole)
+                choices = {b_keep: "keep", b_swap: "swap", b_skip: "skip"}
+            b_cancel = box.addButton("Cancel download", QtWidgets.QMessageBox.RejectRole)
+            box.setDefaultButton(b_skip)
+            box.exec()
+            clicked = box.clickedButton()
+            if clicked is b_cancel or clicked not in choices:
+                return None
+            d = choices[clicked]
+            dec[a["id"]] = (d, olds)
+            if chk.isChecked():
+                if same:
+                    same_all = d
+                else:
+                    other_all = d
+        return dec
+
+    def _swap_in_library(self, olds, new):
+        """Новый файл встаёт в библиотеке на место старых: те же группы и избранное. Старые файлы остаются на диске."""
+        lib = self.lib
+        keys = {path_key(p) for p in olds if path_key(p) != path_key(new)}
+        if not keys:
+            return
+        groups = [g["name"] for g in lib.groups if any(path_key(f) in keys for f in g["files"])]
+        was_fav = any(path_key(f) in keys for f in lib.favorites)
+        lib.remove_files(ALL_GROUP, [p for p in olds if path_key(p) in keys])
+        for gname in groups:
+            lib.add_files(gname, [new])
+        if was_fav:
+            lib.set_favorite([new], True)
+
     def _plan(self):
         res = self.cmb_res.currentData()
         plan = []
@@ -3259,6 +3495,15 @@ class AmbientCGDialog(QtWidgets.QDialog):
         if not plan:
             if self._plan_failed:
                 self._info("Could not get download links: %s" % ", ".join(self._plan_failed), error=True)
+            return
+        decisions = self._resolve_existing(plan)
+        if decisions is None:
+            self._info("Download cancelled.")
+            return
+        in_lib = [a["title"] for a, _r, _u, _s in plan if decisions.get(a["id"], ("",))[0] == "skip"]
+        plan = [x for x in plan if decisions.get(x[0]["id"], ("",))[0] != "skip"]
+        if not plan:
+            self._info("Nothing to download: already in the library (%d)." % len(in_lib))
             return
         folder = self.folder
         if not folder or not os.path.isdir(folder):
@@ -3283,7 +3528,8 @@ class AmbientCGDialog(QtWidgets.QDialog):
                 label = "%s %s (%d of %d)" % (a["title"], res, n, len(plan))
                 existing = self._existing(a, res, folder)
                 path = None
-                if os.path.isfile(existing):
+                d, olds = decisions.get(a["id"], ("", []))
+                if os.path.isfile(existing) and d != "replace":
                     path = existing
                     skipped.append(a["title"])
                 else:
@@ -3307,6 +3553,8 @@ class AmbientCGDialog(QtWidgets.QDialog):
                 self.progress.setFormat("%s: adding to the library..." % label)
                 QtWidgets.QApplication.processEvents()
                 self._register(path, res)
+                if d in ("swap", "replace"):
+                    self._swap_in_library(olds, path)    # «заменить»: новый файл на месте прежнего в группах и избранном
                 done_files.append(a["title"])
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
@@ -3321,6 +3569,8 @@ class AmbientCGDialog(QtWidgets.QDialog):
         msg = "Downloaded and added to group “%s”: %d" % (self.SITE, len(done_files))
         if skipped:
             msg += " (already on disk: %d)" % len(skipped)
+        if in_lib:
+            msg += ". Skipped, already in the library: %d" % len(in_lib)
         if failed:
             msg += ". Failed: %s" % ", ".join(failed)
         if self._cancel:
@@ -3513,6 +3763,7 @@ class PolyHavenDialog(AmbientCGDialog):
 
     SITE = PH_SITE
     TITLE = "Download HDRIs from Poly Haven"
+    NAME_RE = r"^(?P<id>.+)_(?P<res>\d+k)\.(?:hdr|exr)$"   # имя скачанного файла: <id>_<res>.hdr|exr
     INFO = "CC0 license: free to use, including in commercial projects. Source: polyhaven.com"
     CATS = PH_CATS
     FOLDER_ATTR, RES_ATTR = "ph_folder", "ph_res"
@@ -5239,8 +5490,7 @@ class LibraryDialog(QtWidgets.QDialog):
             return
         if self.apply_cb(p):
             self.current_path = p
-            self._fill_files()
-            self._info("Applied: %s" % os.path.basename(p))
+            self.accept()                 # карта применена — окно закрывается (done() сохраняет библиотеку и делает бэкап)
 
 
 # ==========================================================================
@@ -6048,7 +6298,29 @@ class SafeEnvironment(QtWidgets.QWidget):
         ur.addWidget(self.b_update_menu)
         root.addLayout(ur)
 
-        # --- превью ---
+        # --- источник неба: HDRI / Corona Sky ---
+        er = QtWidgets.QHBoxLayout()
+        er.setSpacing(0)
+        self.b_env_hdri = QtWidgets.QPushButton("HDRI")
+        self.b_env_sky = QtWidgets.QPushButton("Corona Sky")
+        for b_ in (self.b_env_hdri, self.b_env_sky):
+            b_.setCheckable(True)
+            b_.setProperty("seg", True)
+        self.b_env_hdri.setToolTip("Light the scene with an HDRI map from your library.")
+        self.b_env_sky.setToolTip("Procedural Corona Sky: the sky is built from the Corona Sun position.\n"
+                                  "The last HDRI and its settings are remembered in the scene: “HDRI” brings them back.")
+        self.b_env_hdri.clicked.connect(lambda: self.set_env_mode("hdri"))
+        self.b_env_sky.clicked.connect(lambda: self.set_env_mode("sky"))
+        er.addWidget(self.b_env_hdri)
+        er.addWidget(self.b_env_sky)
+        root.addLayout(er)
+
+        # --- превью и навигация по картам (только для HDRI) ---
+        self.w_hdri_top = QtWidgets.QWidget()
+        top = QtWidgets.QVBoxLayout(self.w_hdri_top)
+        top.setContentsMargins(0, 0, 0, 0)
+        top.setSpacing(4)
+        root.addWidget(self.w_hdri_top)
         self.lbl_preview = ClickableLabel("No HDRI\n(click to open the library)")
         self.lbl_preview.setFixedSize(PREVIEW_W, PREVIEW_H)
         self.lbl_preview.setAlignment(QtCore.Qt.AlignCenter)
@@ -6060,11 +6332,11 @@ class SafeEnvironment(QtWidgets.QWidget):
         row.addStretch(1)
         row.addWidget(self.lbl_preview)
         row.addStretch(1)
-        root.addLayout(row)
+        top.addLayout(row)
         self.lbl_current = QtWidgets.QLabel("—")
         self.lbl_current.setAlignment(QtCore.Qt.AlignCenter)
         self.lbl_current.setWordWrap(True)
-        root.addWidget(self.lbl_current)
+        top.addWidget(self.lbl_current)
 
         row_nav = QtWidgets.QHBoxLayout()
         b_prev = QtWidgets.QPushButton("Prev")
@@ -6078,7 +6350,7 @@ class SafeEnvironment(QtWidgets.QWidget):
         b_next.clicked.connect(lambda: self.step_hdri(1))
         row_nav.addWidget(b_prev)
         row_nav.addWidget(b_next)
-        root.addLayout(row_nav)
+        top.addLayout(row_nav)
         row = QtWidgets.QHBoxLayout()
         b_lib = QtWidgets.QPushButton("Library...")
         set_btn_icon(b_lib, "library")
@@ -6088,7 +6360,13 @@ class SafeEnvironment(QtWidgets.QWidget):
         b_reload.clicked.connect(self.reload_hdr)
         row.addWidget(b_lib)
         row.addWidget(b_reload)
-        root.addLayout(row)
+        top.addLayout(row)
+        # режим Corona Sky: вместо превью — короткая подпись
+        self.lbl_sky_mode = QtWidgets.QLabel("Corona Sky: procedural sky driven by the Corona Sun")
+        self.lbl_sky_mode.setAlignment(QtCore.Qt.AlignCenter)
+        self.lbl_sky_mode.setWordWrap(True)
+        self.lbl_sky_mode.setStyleSheet("border: 1px solid #555; border-radius: 6px; background: #222; padding: 10px; color: #c8d4e4;")
+        root.addWidget(self.lbl_sky_mode)
         b_ir = QtWidgets.QPushButton("Start Interactive Render")
         b_ir.setMinimumHeight(30)
         b_ir.setToolTip("Starts Corona Interactive Rendering in the active viewport.")
@@ -6102,7 +6380,7 @@ class SafeEnvironment(QtWidgets.QWidget):
         f = QtWidgets.QFormLayout(g.body)
         f.setContentsMargins(0, 2, 0, 0)
         self.sp_rot = make_spin(-100000, 100000, 1, 0, "°", default=0.0, pixel_divider=1.0)   # целые градусы, 1°/пиксель
-        self.sl_rot = QtWidgets.QSlider(QtCore.Qt.Horizontal)
+        self.sl_rot = JumpSlider(QtCore.Qt.Horizontal)       # клик по дорожке — сразу на этот угол
         self.sl_rot.setRange(0, 360)               # 0° — левый край, 360° — правый
         self.sl_rot.setTracking(False)           # применять при отпускании, а не на каждый пиксель
         self.sp_exp = make_spin(-10, 10, 0.1, 2, " EV", default=0.0)
@@ -6179,6 +6457,55 @@ class SafeEnvironment(QtWidgets.QWidget):
         b_reset.clicked.connect(self.reset_hdri_settings)
         f.addRow(b_reset)
         root.addWidget(g)
+        self._card_hdri = g
+
+        # --- Corona Sky ---
+        gk = self._card("Corona Sky", "sky")
+        self._card_sky = gk
+        fk = QtWidgets.QFormLayout(gk.body)
+        fk.setContentsMargins(0, 2, 0, 0)
+        lk = QtWidgets.QLabel("The sky follows the sun: change Height / Azimuth in the Sun section or click the compass.")
+        lk.setWordWrap(True)
+        lk.setStyleSheet("color: #b0b0b0;")
+        fk.addRow(lk)
+        rowt = QtWidgets.QHBoxLayout()
+        rowt.setSpacing(2)
+        for text, el, tip in (("Morning", 15.0, "Sun height 15°"), ("Noon", 60.0, "Sun height 60°"),
+                              ("Evening", 12.0, "Sun height 12°"), ("Sunset", 2.0, "Sun height 2°")):
+            bt = QtWidgets.QPushButton(text)
+            bt.setToolTip(tip)
+            bt.clicked.connect(lambda _=False, e=el: self._sky_time(e))
+            rowt.addWidget(bt)
+        fk.addRow(rowt)
+        self.sp_sky_int = make_spin(0, 100, 0.1, 2, default=1.0)
+        self.sp_sky_int.setToolTip("Corona Sky intensity multiplier: brightness of the sky.")
+        self.sp_sky_turb = make_spin(1.7, 10, 0.1, 2, default=2.5)
+        self.sp_sky_turb.setToolTip("Turbidity: haze in the air. 2 = very clear, 3-4 = typical, 6+ = hazy.")
+        fk.addRow("Intensity", self.sp_sky_int)
+        fk.addRow("Turbidity", self.sp_sky_turb)
+        self.chk_clouds = ToggleSwitch("Clouds")
+        self.chk_clouds.setToolTip("Procedural Corona Sky clouds.")
+        self.b_new_clouds = QtWidgets.QPushButton("New clouds")
+        self.b_new_clouds.setToolTip("Another random cloud pattern (changes the seed).")
+        self.b_new_clouds.clicked.connect(self._sky_new_clouds)
+        rowc = QtWidgets.QHBoxLayout()
+        rowc.addWidget(self.chk_clouds)
+        rowc.addWidget(self.b_new_clouds)
+        rowc.addStretch(1)
+        fk.addRow(rowc)
+        self.sp_cl_amount = make_spin(0, 1, 0.05, 2, default=0.5)
+        self.sp_cl_var = make_spin(0, 1, 0.05, 2, default=0.5)
+        self.sp_cl_cirrus = make_spin(0, 1, 0.05, 2, default=0.5)
+        self.sp_cl_seed = make_spin(0, 100000, 1, 0, default=0.0, pixel_divider=1.0)
+        fk.addRow("Cloud amount", self.sp_cl_amount)
+        fk.addRow("Cloud variety", self.sp_cl_var)
+        fk.addRow("Cirrus", self.sp_cl_cirrus)
+        fk.addRow("Cloud seed", self.sp_cl_seed)
+        for w_ in (self.sp_sky_int, self.sp_sky_turb, self.sp_cl_amount, self.sp_cl_var, self.sp_cl_cirrus,
+                   self.sp_cl_seed):
+            w_.valueChanged.connect(self._on_sky_setting)
+        self.chk_clouds.toggled.connect(self._on_sky_setting)
+        root.addWidget(gk)
 
         # --- солнце ---
         gs = self._card("Sun (Corona Sun)", "sun")
@@ -6229,6 +6556,7 @@ class SafeEnvironment(QtWidgets.QWidget):
         mark_primary(b_align)
         set_btn_icon(b_align, "link", "#1e1e1e")
         sl.addWidget(b_align)
+        self.b_align = b_align
         self.prog_find = QtWidgets.QProgressBar()
         self.prog_find.setRange(0, 100)
         self.prog_find.setTextVisible(True)
@@ -6379,6 +6707,138 @@ class SafeEnvironment(QtWidgets.QWidget):
                            (fs, self.sp_size), (fs, self.sp_dist), (fs, self.sp_icon)]
         self._adv_widgets = [b_pexp, b_pimp, b_pscene, self._card_compass]
         self._apply_mode()
+        self._apply_env_ui()
+
+    # ---------- источник неба: HDRI / Corona Sky ----------
+    def _apply_env_ui(self):
+        """Показывает то, что относится к текущему источнику неба (режим читается из сцены)."""
+        sky = get_sky() is not None
+        try:
+            self.w_hdri_top.setVisible(not sky)
+            self.lbl_sky_mode.setVisible(sky)
+            self._card_hdri.setVisible(not sky)
+            self._card_sky.setVisible(sky)
+            self.b_align.setVisible(not sky)
+            self.chk_link.setVisible(not sky)
+            self.chk_compass_tex.setVisible(not sky)
+            self.b_env_hdri.setChecked(not sky)
+            self.b_env_sky.setChecked(sky)
+            if sky:
+                self.prog_find.setVisible(False)
+        except AttributeError:
+            pass                                       # окно ещё строится
+
+    def _store_hdri_state(self):
+        path = self._current_path()
+        if path:
+            d = dict(self._hdri_values())
+            d["path"] = path
+            scene_prop_set(FILEPROP_HDRI, d)
+
+    def _store_sky_state(self, sky=None):
+        sky = sky or get_sky()
+        if sky is not None:
+            scene_prop_set(FILEPROP_SKY, sky_read(sky))
+
+    @undoable("Sky source")
+    def set_env_mode(self, mode):
+        if mode == "sky":
+            if get_sky() is not None:
+                self._apply_env_ui()
+                return
+            if corona_renderer() is None:
+                self._status("Current renderer is not Corona: Corona Sky is unavailable.", error=True)
+                self._apply_env_ui()
+                return
+            _cc, bm, other = get_chain()
+            if other:
+                r = QtWidgets.QMessageBox.question(
+                    self, WINDOW_TITLE, "The Single map slot (Scene Environment) holds a different map.\n"
+                    "Replace it with Corona Sky?\n\nYou can undo with Ctrl+Z.")
+                if r != QtWidgets.QMessageBox.Yes:
+                    self._apply_env_ui()
+                    return
+            if bm is not None:
+                self._store_hdri_state()               # чтобы кнопка «HDRI» вернула ту же карту и настройки
+            if find_sun() is None:
+                self.create_sun()
+            st = dict(SKY_DEFAULTS)
+            st.update(scene_prop_get(FILEPROP_SKY) or {})
+
+            def do():
+                clear_channels()                       # наши Direct/Reflect/Refract ссылались на HDRI
+                sky = rt.CoronaSky()
+                sky.name = SKY_NAME
+                sky_write(sky, st)
+                s = find_sun()
+                if s is not None:
+                    s.on = True
+                    try:
+                        sky.selectedSun = s
+                    except Exception:
+                        pass
+                set_single_map(sky)
+                return True
+
+            if self._run("Corona Sky", do):
+                self.sync_from_scene()
+                self._status("Corona Sky: the sky follows the sun. Change the sun Height / Azimuth or use the compass.")
+            return
+        # --- обратно к HDRI ---
+        sky = get_sky()
+        if sky is not None:
+            self._store_sky_state(sky)
+        st = scene_prop_get(FILEPROP_HDRI) or {}
+        path = st.get("path", "")
+        if path and os.path.isfile(path):
+            if not self.apply_path(path, auto_exposure=False):
+                self._apply_env_ui()
+                return
+            vals = dict(self._hdri_values())
+            vals.update({k: st[k] for k in vals if k in st})
+            self._run("restore HDRI settings", lambda: self._write_hdri(**vals))
+            self.sync_from_scene()
+            if self.chk_link.isChecked() and find_sun() is not None:
+                self._align_impl(create_if_missing=False, quiet=True)
+            self._status("HDRI restored: %s." % os.path.basename(path))
+            return
+        if sky is not None:
+            def clear():
+                r = corona_renderer()
+                if r is not None and _our_sky(r.bg_texmap) is not None:
+                    r.bg_texmap = None
+                return True
+            self._run("remove Corona Sky", clear)
+        self.sync_from_scene()
+        self._status("Pick an HDRI in the library." if not path else "HDRI file not found: %s" % path,
+                     error=bool(path))
+        self.open_library()
+
+    @undoable("Corona Sky")
+    def _on_sky_setting(self, *_):
+        if self._loading:
+            return
+        sky = get_sky()
+        if sky is None:
+            return
+        d = dict(intensity=self.sp_sky_int.value(), turbidity=self.sp_sky_turb.value(),
+                 clouds=self.chk_clouds.isChecked(), clouds_amount=self.sp_cl_amount.value(),
+                 clouds_variety=self.sp_cl_var.value(), clouds_cirrus=self.sp_cl_cirrus.value(),
+                 clouds_seed=int(self.sp_cl_seed.value()))
+        self._run("Corona Sky", lambda: (sky_write(sky, d), True)[1])
+        self._refresh_state()
+
+    def _sky_time(self, elevation):
+        if find_sun() is None:
+            self.create_sun()
+        self.sp_elev.setValue(float(elevation))     # -> _on_sun_setting: солнце и небо меняются вместе
+
+    def _sky_new_clouds(self):
+        import random
+        self._loading = True
+        self.chk_clouds.setChecked(True)
+        self._loading = False
+        self.sp_cl_seed.setValue(float(random.randint(1, 99999)))
 
     def _card(self, title, key):
         card = CollapsibleCard(title, key, collapsed=(key in self.lib.ui_collapsed))
@@ -6428,12 +6888,17 @@ class SafeEnvironment(QtWidgets.QWidget):
             i = keys.index(cur)
         else:
             i = -1 if direction > 0 else 0
+        # Exposure, введённая пользователем, при перелистывании сохраняется (поправка яркости новой карты
+        # по-прежнему применяется под капотом)
+        keep_ev = self.sp_exp.value() if self._current_path() else 0.0
         for _ in range(n):
             i = (i + direction) % n
             if os.path.isfile(files[i]):
-                if self.apply_path(files[i]):
-                    self._status("%s  [%d/%d, group “%s”]%s" % (os.path.basename(files[i]), i + 1, n, group,
-                                                               getattr(self, "_sun_skip_note", "")))
+                if self.apply_path(files[i], auto_exposure=False):
+                    self._set_exposure(keep_ev)
+                    ev_note = ("  Exposure %+.2f EV kept." % keep_ev) if abs(keep_ev) >= 0.005 else ""
+                    self._status("%s  [%d/%d, group “%s”]%s%s" % (os.path.basename(files[i]), i + 1, n, group,
+                                                                 ev_note, getattr(self, "_sun_skip_note", "")))
                 return
         self._status("There are no available files in group “%s”." % group, error=True)
 
@@ -6697,6 +7162,8 @@ class SafeEnvironment(QtWidgets.QWidget):
             self._status("Current renderer is not Corona: the Single map slot is unavailable.", error=True)
             return False
         cc, bm, other = get_chain()
+        if get_sky() is not None:
+            self._store_sky_state()          # уходим из Corona Sky: кнопка «Corona Sky» вернёт эти настройки
         if other:
             Msg = QtWidgets.QMessageBox
             r = Msg.question(
@@ -7053,7 +7520,7 @@ class SafeEnvironment(QtWidgets.QWidget):
             if r is not None:
                 clear_channels()
                 cur = r.bg_texmap
-                if cur is None or _our_chain(cur) is not None:
+                if cur is None or _our_chain(cur) is not None or _our_sky(cur) is not None:
                     r.bg_texmap = None
                     r.bg_source = 0           # снова «3ds Max settings (Environment tab)»
                 else:
@@ -7308,6 +7775,10 @@ class SafeEnvironment(QtWidgets.QWidget):
         d = dict(self._hdri_values())
         d["hdri"] = self._current_path()
         d["fmt"] = 3                      # 2: Saturation 100 = норма; 3: расстояние и значок в метрах
+        sky = get_sky()
+        d["env"] = "sky" if sky is not None else "hdri"
+        if sky is not None:
+            d["sky"] = sky_read(sky)
         s = find_sun()
         d["sun"] = None if s is None else dict(
             on=self.chk_on.isChecked(), height=self.sp_elev.value(), azimuth=self.sp_azim.value(),
@@ -7543,22 +8014,36 @@ class SafeEnvironment(QtWidgets.QWidget):
             self._status("Select a preset.")
             return
         notes = []
-        path = p.get("hdri", "")
-        if path:
-            if os.path.isfile(path):
-                if not self.apply_path(path, auto_exposure=False):
-                    return
-            else:
-                notes.append("HDRI file not found: %s" % path)
-        sat = float(p.get("saturation", 100.0 if p.get("fmt", 1) >= 2 else 0.0))
-        if p.get("fmt", 1) < 2:
-            sat += 100.0                  # пресет старого формата: 0 = норма
-        vals = dict(rotation=p.get("rotation", 0.0), exposure=p.get("exposure", 0.0),
-                    gamma=p.get("gamma", 1.0), saturation=sat, blur=p.get("blur", BLUR_DEFAULT),
-                    horizon=p.get("horizon", 0.0), cam_ev=p.get("cam_ev", 0.0),
-                    refl_ev=p.get("refl_ev", 0.0), refr_ev=p.get("refr_ev", 0.0))
-        if self._run("preset HDRI", lambda: self._write_hdri(**vals)) is False:
-            notes.append("HDRI settings not applied (no HDRI)")
+        if p.get("env") == "sky":
+            # пресет с Corona Sky: небо и его параметры, затем солнце (небо следует за ним)
+            if get_sky() is None:
+                self.set_env_mode("sky")
+            sky = get_sky()
+            if sky is None:
+                notes.append("Corona Sky not applied")
+            elif p.get("sky"):
+                st = dict(SKY_DEFAULTS)
+                st.update(p["sky"])
+                self._run("preset Corona Sky", lambda: (sky_write(sky, st), True)[1])
+        else:
+            if get_sky() is not None:
+                self._store_sky_state()               # кнопка «Corona Sky» вернёт эти настройки неба
+            path = p.get("hdri", "")
+            if path:
+                if os.path.isfile(path):
+                    if not self.apply_path(path, auto_exposure=False):
+                        return
+                else:
+                    notes.append("HDRI file not found: %s" % path)
+            sat = float(p.get("saturation", 100.0 if p.get("fmt", 1) >= 2 else 0.0))
+            if p.get("fmt", 1) < 2:
+                sat += 100.0                  # пресет старого формата: 0 = норма
+            vals = dict(rotation=p.get("rotation", 0.0), exposure=p.get("exposure", 0.0),
+                        gamma=p.get("gamma", 1.0), saturation=sat, blur=p.get("blur", BLUR_DEFAULT),
+                        horizon=p.get("horizon", 0.0), cam_ev=p.get("cam_ev", 0.0),
+                        refl_ev=p.get("refl_ev", 0.0), refr_ev=p.get("refr_ev", 0.0))
+            if self._run("preset HDRI", lambda: self._write_hdri(**vals)) is False:
+                notes.append("HDRI settings not applied (no HDRI)")
         sun = p.get("sun")
         if sun:
             if find_sun() is None:
@@ -7678,6 +8163,17 @@ class SafeEnvironment(QtWidgets.QWidget):
                 self.lbl_current.setText("A different map is in the Single map slot")
             else:
                 self.lbl_current.setText("—")
+            sky = get_sky()
+            if sky is not None:
+                d = sky_read(sky)
+                self.sp_sky_int.setValue(d["intensity"])
+                self.sp_sky_turb.setValue(d["turbidity"])
+                self.chk_clouds.setChecked(d["clouds"])
+                self.sp_cl_amount.setValue(d["clouds_amount"])
+                self.sp_cl_var.setValue(d["clouds_variety"])
+                self.sp_cl_cirrus.setValue(d["clouds_cirrus"])
+                self.sp_cl_seed.setValue(float(d["clouds_seed"]))
+            self._apply_env_ui()
 
             s = find_sun()
             if s is None:
