@@ -1,5 +1,8 @@
 # История версий
 
+## v0.80 — 2026-11-19
+- Corona Sky: Altitude (observer height in meters) and Ground color; both are saved in presets and restored when you switch HDRI ↔ Corona Sky
+
 ## v0.79 — 2026-11-19
 - “Create at center” finds a sun that is hidden (or on a hidden layer) and shows it; a new sun goes to a visible layer “SkyRig Studio” when the current layer is hidden
 - Corona Sky: cloud parameters and “New clouds” appear only when Clouds is on

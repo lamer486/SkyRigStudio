@@ -52,7 +52,7 @@ import pymxs
 from PySide6 import QtWidgets, QtCore, QtGui
 import qtmax
 
-VERSION = "0.79"
+VERSION = "0.80"
 WINDOW_TITLE = "SkyRig Studio v" + VERSION
 COPYRIGHT_TEXT = "Script created with the help of Claude AI by Vasiliy Kanevskiy, 2026."
 CONTACT_EMAIL = "kanevskiy.vasiliy@gmail.com"
@@ -1682,10 +1682,10 @@ def _our_chain(m):
 
 SKY_NAME = "EnvSky"                     # наша карта CoronaSky в слоте Single map
 SKY_DEFAULTS = dict(intensity=1.0, turbidity=2.5, clouds=False, clouds_amount=0.5, clouds_variety=0.5,
-                    clouds_cirrus=0.5, clouds_seed=0)
+                    clouds_cirrus=0.5, clouds_seed=0, altitude=0.0, ground_color=[51, 51, 51])
 SKY_ATTRS = dict(intensity="intensityMultiplier", turbidity="turbidity", clouds="cloudsEnable",
                  clouds_amount="cloudsAmount", clouds_variety="cloudsVariety", clouds_cirrus="cloudsCirrusAmount",
-                 clouds_seed="cloudsSeed")
+                 clouds_seed="cloudsSeed", altitude="altitude", ground_color="GroundColor")
 FILEPROP_HDRI = "SkyRigStudio_HDRI"      # последняя HDRI и её настройки (для возврата из режима Corona Sky)
 FILEPROP_SKY = "SkyRigStudio_Sky"        # настройки неба (для возврата в режим Corona Sky)
 
@@ -1726,6 +1726,10 @@ def get_sky():
 
 def _sky_cast(k, v):
     dv = SKY_DEFAULTS[k]
+    if isinstance(dv, list):                    # цвет: [r, g, b] 0..255 <-> MAXScript color
+        if isinstance(v, (list, tuple)):
+            return [max(0, min(255, int(round(float(c))))) for c in v[:3]]
+        return [int(round(float(v.r))), int(round(float(v.g))), int(round(float(v.b)))]
     if isinstance(dv, bool):
         return bool(v)
     if isinstance(dv, int):
@@ -1747,7 +1751,10 @@ def sky_write(sky, d):
     for k, a in SKY_ATTRS.items():
         if k in d:
             try:
-                setattr(sky, a, _sky_cast(k, d[k]))
+                v = _sky_cast(k, d[k])
+                if isinstance(v, list):
+                    v = rt.color(*v)
+                setattr(sky, a, v)
             except Exception:
                 print("[SkyRig Studio] Corona Sky: cannot set %s" % a)
 
@@ -2595,6 +2602,51 @@ def make_spin(lo, hi, step, decimals=2, suffix="", default=None, pixel_divider=N
     if suffix:
         s.setSuffix(suffix)
     return s
+
+
+class ColorSwatch(QtWidgets.QPushButton):
+    """Образец цвета: клик — выбор цвета, правый клик — значение по умолчанию. Сигнал color_changed(list[r, g, b])."""
+
+    color_changed = QtCore.Signal(list)
+
+    def __init__(self, rgb, default=None, title="Color", parent=None):
+        super().__init__(parent)
+        self._rgb = list(rgb)
+        self._default = list(default if default is not None else rgb)
+        self._title = title
+        self.setFixedHeight(20)
+        self.setMinimumWidth(60)
+        self.clicked.connect(self._pick)
+        self._paint()
+
+    def rgb(self):
+        return list(self._rgb)
+
+    def set_rgb(self, rgb, emit=False):
+        rgb = [max(0, min(255, int(c))) for c in list(rgb)[:3]]
+        changed = rgb != self._rgb
+        self._rgb = rgb
+        self._paint()
+        if emit and changed:
+            self.color_changed.emit(list(rgb))
+
+    def _paint(self):
+        r, g, b = self._rgb
+        self.setText("")
+        self.setToolTip("%s: %d, %d, %d\nClick to choose, right-click for the default." % (self._title, r, g, b))
+        self.setStyleSheet("QPushButton { background-color: rgb(%d,%d,%d); border: 1px solid #8a8a8a; "
+                           "border-radius: 3px; }" % (r, g, b))     # светлая рамка: образец виден и на сером фоне
+
+    def _pick(self):
+        c = QtWidgets.QColorDialog.getColor(QtGui.QColor(*self._rgb), self, self._title)
+        if c.isValid():
+            self.set_rgb([c.red(), c.green(), c.blue()], emit=True)
+
+    def mousePressEvent(self, e):
+        if e.button() == QtCore.Qt.RightButton:
+            self.set_rgb(self._default, emit=True)
+            return
+        super().mousePressEvent(e)
 
 
 # ==========================================================================
@@ -6606,6 +6658,12 @@ class SafeEnvironment(QtWidgets.QWidget):
         fk.addRow("Intensity", self.sp_sky_int)
         fk.addRow("Exposure", self.sp_sky_exp)
         fk.addRow("Turbidity", self.sp_sky_turb)
+        self.sp_sky_alt = make_spin(0, 100000, 100, 0, " m", default=0.0, pixel_divider=4.0)   # 25 м на пиксель
+        self.sp_sky_alt.setToolTip("Altitude of the observer above the ground, in meters: higher = thinner air, "
+                                   "darker blue sky and a lower horizon.")
+        fk.addRow("Altitude", self.sp_sky_alt)
+        self.sw_sky_ground = ColorSwatch(SKY_DEFAULTS["ground_color"], title="Ground color")
+        fk.addRow("Ground color", self.sw_sky_ground)
         self.chk_clouds = ToggleSwitch("Clouds")
         self.chk_clouds.setToolTip("Procedural Corona Sky clouds.")
         self.b_new_clouds = QtWidgets.QPushButton("New clouds")
@@ -6643,6 +6701,8 @@ class SafeEnvironment(QtWidgets.QWidget):
         for w_ in (self.sp_sky_int, self.sp_sky_turb, self.sp_cl_amount, self.sp_cl_var, self.sp_cl_cirrus,
                    self.sp_cl_seed, self.sp_sky_exp, self.sp_sky_cam, self.sp_sky_refl, self.sp_sky_refr):
             w_.valueChanged.connect(self._on_sky_setting)
+        self.sp_sky_alt.valueChanged.connect(self._on_sky_setting)
+        self.sw_sky_ground.color_changed.connect(self._on_sky_setting)
         self.chk_clouds.toggled.connect(self._on_sky_setting)
         self.chk_clouds.toggled.connect(self._show_cloud_rows)
         self._show_cloud_rows(self.chk_clouds.isChecked())
@@ -7025,7 +7085,8 @@ class SafeEnvironment(QtWidgets.QWidget):
                  clouds=self.chk_clouds.isChecked(), clouds_amount=self.sp_cl_amount.value(),
                  clouds_variety=self.sp_cl_var.value(), clouds_cirrus=self.sp_cl_cirrus.value(),
                  clouds_seed=int(self.sp_cl_seed.value()), exposure=self.sp_sky_exp.value(),
-                 cam_ev=self.sp_sky_cam.value(), refl_ev=self.sp_sky_refl.value(), refr_ev=self.sp_sky_refr.value())
+                 cam_ev=self.sp_sky_cam.value(), refl_ev=self.sp_sky_refl.value(), refr_ev=self.sp_sky_refr.value(),
+                 altitude=self.sp_sky_alt.value(), ground_color=self.sw_sky_ground.rgb())
         self._skipped_channels = []
         self._run("Corona Sky", lambda: self._write_sky(d))
         if self._skipped_channels:
@@ -8391,6 +8452,8 @@ class SafeEnvironment(QtWidgets.QWidget):
                     if self.lib.channel_target == TARGET_CAMERA else "Corona global settings"))
                 self.sp_sky_int.setValue(d["intensity"])
                 self.sp_sky_turb.setValue(d["turbidity"])
+                self.sp_sky_alt.setValue(d.get("altitude", 0.0))
+                self.sw_sky_ground.set_rgb(d.get("ground_color", SKY_DEFAULTS["ground_color"]))
                 self.chk_clouds.setChecked(d["clouds"])
                 self.sp_cl_amount.setValue(d["clouds_amount"])
                 self.sp_cl_var.setValue(d["clouds_variety"])
