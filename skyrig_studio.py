@@ -52,7 +52,7 @@ import pymxs
 from PySide6 import QtWidgets, QtCore, QtGui
 import qtmax
 
-VERSION = "0.81"
+VERSION = "0.82"
 WINDOW_TITLE = "SkyRig Studio v" + VERSION
 COPYRIGHT_TEXT = "Script created with the help of Claude AI by Vasiliy Kanevskiy, 2026."
 CONTACT_EMAIL = "kanevskiy.vasiliy@gmail.com"
@@ -72,7 +72,7 @@ ALL_GROUP = "All files"              # виртуальная группа: об
 FAV_GROUP = "★ Favorites"            # виртуальная группа: избранные карты (v0.73)
 THUMB_W, THUMB_H = 256, 128
 PREVIEW_W, PREVIEW_H = 200, 100        # превью в главном окне (компактное)
-CARDS_COLLAPSED_BY_DEFAULT = ("fog",)   # секции, свёрнутые при первом запуске (дальше окно помнит выбор)
+CARDS_COLLAPSED_BY_DEFAULT = ("fog",)   # секции, которые при каждом открытии окна свёрнуты
 DOCK_WIDTH = 352                    # ширина док-панели (и минимальная: уже — кнопки уходят за край)
 THUMB_GAMMA = 1.0                     # гамма превью (1.0 = без гамма-кривой)
 THUMB_EV_RANGE = 4.0                  # ползунок экспозиции превью: ±EV
@@ -1772,28 +1772,135 @@ def sky_write(sky, d):
 FOG_PREFIX = "SRS_Fog_"
 FILEPROP_FOGS = "SkyRigStudio_Fogs"
 FOG_NONE, FOG_GLOBAL, FOG_OTHER = "<none>", "<global>", "<other>"
-FOG_DEFAULTS = dict(abs_color=[235, 235, 235], distance=150.0, scat_color=[225, 225, 225], directionality=0.5,
-                    single_bounce=True, emis_color=[255, 255, 255], emis_distance=0.0, abs_map_on=True,
-                    scat_map_on=True, emis_map_on=True, step=0.01, mapping=0, alpha=0, mixing=True, caustics=True)
+# Цвета хранятся так же, как в материале (значения MAXScript); в окне выбора цвета 3ds Max с гаммой 2.2
+# Absorption 127.5 выглядит как 186, 186, 186 — это цвета нового CoronaVolumeMtl.
+# Всё по умолчанию — как в новом CoronaVolumeMtl (Distance 0, Directionality 0, Single bounce выкл., Step 1 см).
+FOG_DEFAULTS = dict(abs_color=[127.5, 127.5, 127.5], distance=0.0, scat_color=[0.0, 0.0, 0.0], directionality=0.0,
+                    single_bounce=False, emis_color=[255.0, 255.0, 255.0], emis_distance=0.0, step=0.01, mapping=0,
+                    alpha=0)
 # значение -> (свойство CoronaVolumeMtl, вид): c — цвет, m — расстояние в метрах (в сцене — единицы сцены)
 FOG_ATTRS = dict(abs_color=("absorptionColor", "c"), distance=("absorptionDist", "m"),
                  scat_color=("scatteringColor", "c"), directionality=("scatteringDirectionality", "f"),
                  single_bounce=("singleBounce", "b"), emis_color=("emissionColor", "c"),
-                 emis_distance=("emissionDist", "m"), abs_map_on=("absorptionColorTexmapOn", "b"),
-                 scat_map_on=("scatteringColorTexmapOn", "b"), emis_map_on=("emissionColorTexmapOn", "b"),
-                 step=("stepSize", "m"), mapping=("mappingMode", "i"), alpha=("alphaMode", "i"),
-                 mixing=("allowMixing", "b"), caustics=("enableCaustics", "b"))
-FOG_PRESETS = (
-    ("Light haze", dict(abs_color=[246, 248, 255], distance=900.0, scat_color=[235, 240, 250], directionality=0.6)),
-    ("Morning mist", dict(abs_color=[235, 235, 235], distance=150.0, scat_color=[225, 225, 225], directionality=0.5)),
-    ("Dense fog", dict(abs_color=[205, 205, 205], distance=35.0, scat_color=[235, 235, 235], directionality=0.3)),
-    ("Smog", dict(abs_color=[205, 185, 155], distance=300.0, scat_color=[195, 180, 155], directionality=0.4)),
-    ("Sunset glow", dict(abs_color=[255, 212, 170], distance=500.0, scat_color=[255, 200, 150], directionality=0.7)),
-)
+                 emis_distance=("emissionDist", "m"), step=("stepSize", "m"), mapping=("mappingMode", "i"),
+                 alpha=("alphaMode", "i"))
+# карты в слотах цвета: ключ -> (карта, галочка «карта включена»)
+FOG_MAPS = dict(abs=("absorptionColorTexmap", "absorptionColorTexmapOn"),
+                scat=("scatteringColorTexmap", "scatteringColorTexmapOn"),
+                emis=("emissionColorTexmap", "emissionColorTexmapOn"))
+
+
+def fog_get_map(m, key):
+    try:
+        return getattr(m, FOG_MAPS[key][0])
+    except Exception:
+        return None
+
+
+def fog_set_map(m, key, tex):
+    a, on = FOG_MAPS[key]
+    setattr(m, a, tex)
+    if tex is not None:
+        setattr(m, on, True)
+
+
+# Библиотека туманов сцены: материалы хранятся в атрибуте корневого узла (rootNode), поэтому туман, который сейчас
+# никуда не назначен, сохраняется в файле вместе со своими картами.
+_FOG_LIB_DEF = None
+
+
+def _fog_lib(create=False):
+    global _FOG_LIB_DEF
+    rn = rt.rootNode
+    try:
+        for i in range(1, int(rt.custAttributes.count(rn)) + 1):
+            ca = rt.custAttributes.get(rn, i)
+            if ca is not None and str(ca.name) == "SRS_FogLib":
+                return ca
+    except Exception:
+        pass
+    if not create:
+        return None
+    if _FOG_LIB_DEF is None:
+        _FOG_LIB_DEF = rt.execute('attributes SRS_FogLib attribID:#(0x5a31c7e2, 0x1f2b9d44) '
+                                  '( parameters main ( fogs type:#materialTab tabSizeVariable:true ) )')
+        rt.execute('global SRS_fogLibAdd = fn SRS_fogLibAdd ca m = (if findItem ca.fogs m == 0 do append ca.fogs m; ok)')
+        rt.execute('global SRS_fogLibDel = fn SRS_fogLibDel ca m = (local i = findItem ca.fogs m; '
+                   'if i > 0 do deleteItem ca.fogs i; ok)')
+    rt.custAttributes.add(rn, _FOG_LIB_DEF)
+    return _fog_lib(False)
+
+
+def _fog_lib_fns():
+    try:
+        return rt.SRS_fogLibAdd, rt.SRS_fogLibDel
+    except Exception:
+        rt.execute('global SRS_fogLibAdd = fn SRS_fogLibAdd ca m = (if findItem ca.fogs m == 0 do append ca.fogs m; ok)')
+        rt.execute('global SRS_fogLibDel = fn SRS_fogLibDel ca m = (local i = findItem ca.fogs m; '
+                   'if i > 0 do deleteItem ca.fogs i; ok)')
+        return rt.SRS_fogLibAdd, rt.SRS_fogLibDel
+
+
+def fog_lib_add(m):
+    ca = _fog_lib(True)
+    if ca is not None:
+        _fog_lib_fns()[0](ca, m)
+
+
+def fog_lib_remove(m):
+    ca = _fog_lib(False)
+    if ca is not None:
+        _fog_lib_fns()[1](ca, m)
+
+
+def fog_lib_materials():
+    ca = _fog_lib(False)
+    out = []
+    if ca is not None:
+        try:
+            for m in ca.fogs:
+                if m is not None:
+                    out.append(m)
+        except Exception:
+            pass
+    return out
+
+
+def show_in_slate(ref):
+    """Открывает Slate Material Editor, показывает материал/карту узлом в активном виде (без дубликатов),
+    выделяет его и открывает его параметры."""
+    rt.SRS_slateRef = ref
+    rt.execute(r'''
+(
+  local m = SRS_slateRef
+  MatEditor.mode = #advanced
+  sme.Open()
+  local v = sme.GetView sme.activeView
+  local nd = try (v.GetNodeByRef m) catch (undefined)
+  if nd == undefined do nd = v.CreateNode m [0, 0]
+  try (v.SetSelectedNodes #(m)) catch()          -- Slate выделяет по самому материалу/карте
+  try (sme.SetMtlInParamEditor m) catch()
+  try (v.ZoomExtents type:#selected) catch()
+  ok
+)''')
+
+
+def slate_selected_texmap():
+    """Карта, выделенная в Slate Material Editor (её узел только что перетащили), или None."""
+    try:
+        v = rt.sme.GetView(rt.sme.activeView)
+        for n in (v.GetSelectedNodes() or []):
+            ref = n.reference
+            if ref is not None and rt.superClassOf(ref) == rt.textureMap:
+                return ref
+    except Exception:
+        pass
+    return None
+
 
 
 def _rgb(c):
-    return [int(round(float(c.r))), int(round(float(c.g))), int(round(float(c.b)))]
+    return [round(float(c.r), 2), round(float(c.g), 2), round(float(c.b), 2)]
 
 
 def fog_read(m):
@@ -1816,7 +1923,7 @@ def fog_write(m, d):
         v = d[k]
         try:
             if kind == "c":
-                v = rt.color(*[max(0, min(255, int(c))) for c in list(v)[:3]])
+                v = rt.color(*[max(0.0, min(255.0, float(c))) for c in list(v)[:3]])
             elif kind == "m":
                 v = m_to_units(max(0.0, float(v)))
             elif kind == "b":
@@ -1842,6 +1949,32 @@ def fog_name_of(m):
     return None
 
 
+NO_FOG_NAME = "SRS_NoFog"
+
+
+def _is_no_fog(m):
+    try:
+        return m is not None and _class_name(m) == "CoronaVolumeMtl" and str(m.name) == NO_FOG_NAME
+    except Exception:
+        return False
+
+
+def no_fog_material():
+    """Пустой объём для камер «No fog» (один на сцену: берётся из камер, где он уже стоит)."""
+    for c in fog_cameras():
+        try:
+            if _is_no_fog(c.overrideGlobalVolumeTexmap):
+                return c.overrideGlobalVolumeTexmap
+        except Exception:
+            pass
+    m = rt.CoronaVolumeMtl()
+    m.name = NO_FOG_NAME
+    m.absorptionDist = 0.0
+    m.scatteringColor = rt.color(0, 0, 0)
+    m.emissionDist = 0.0
+    return m
+
+
 def fog_cameras():
     """Все CoronaCam сцены (по имени)."""
     out = []
@@ -1864,6 +1997,10 @@ def fog_slot_get(obj):
         if not bool(obj.overrideGlobalVolumeUse):
             return FOG_GLOBAL, None
         m = obj.overrideGlobalVolumeTexmap
+        if m is None:                     # пустое переопределение Corona игнорирует: камера видит глобальный туман
+            return FOG_GLOBAL, None
+        if _is_no_fog(m):
+            return FOG_NONE, m
     else:
         m = obj.globalVolumeMtl
         if not bool(obj.globalVolumeMtl_use):
@@ -1881,8 +2018,10 @@ def fog_slot_set(obj, mtl, value):
         if value == FOG_GLOBAL:
             obj.overrideGlobalVolumeUse = False
             obj.overrideGlobalVolumeTexmap = None
-        elif value == FOG_NONE:                      # переопределение без материала: в этой камере тумана нет
-            obj.overrideGlobalVolumeTexmap = None
+        elif value == FOG_NONE:
+            # пустой слот Corona не считает переопределением (камера всё равно видит глобальный туман),
+            # поэтому «без тумана» — пустой объём SRS_NoFog: ничего не поглощает, не рассеивает и не светит
+            obj.overrideGlobalVolumeTexmap = no_fog_material()
             obj.overrideGlobalVolumeUse = True
         else:
             obj.overrideGlobalVolumeTexmap = mtl
@@ -1916,6 +2055,10 @@ def fog_materials():
         except Exception:
             continue
         if m is not None and n not in (FOG_NONE, FOG_GLOBAL, FOG_OTHER) and n not in out:
+            out[n] = m
+    for m in fog_lib_materials():                    # туманы, которые сейчас никуда не назначены
+        n = fog_name_of(m)
+        if n is not None and n not in out:
             out[n] = m
     return out
 
@@ -2803,15 +2946,61 @@ def make_spin(lo, hi, step, decimals=2, suffix="", default=None, pixel_divider=N
     return s
 
 
+def color_picker_gamma():
+    """Гамма, с которой 3ds Max показывает цвета в окнах выбора цвета (Preferences -> Gamma and LUT)."""
+    try:
+        return max(0.1, float(rt.displayGamma))
+    except Exception:
+        return 2.2
+
+
+_LIVE_PICK = {"cb": None}
+
+
+def _live_pick_cb(c):
+    cb = _LIVE_PICK.get("cb")
+    if cb is not None:
+        try:
+            cb(c)
+        except Exception:
+            print("[SkyRig Studio] color picker callback:\n" + traceback.format_exc())
+
+
+def open_live_color_picker(rgb, title, cb):
+    """Немодальное окно выбора цвета 3ds Max (то, что выбрано в настройках, например Corona Improved Picker):
+    cb(color) вызывается при каждом изменении, пока окно открыто, — Interactive обновляется сразу.
+    Работает через скрытый MAXScript-диалог с colorPicker (modal:false), по которому «кликаем» сообщением."""
+    _LIVE_PICK["cb"] = cb
+    rt.SRS_cpPy = _live_pick_cb
+    t = ("SkyRig: " + title).replace('"', "'").replace("\\", "/")
+    r, g, b = [max(0.0, min(255.0, float(c))) for c in rgb]
+    rt.execute(r'''
+global SRS_ColorRoll
+for w in (windows.getChildrenHWND 0) where w[5] != undefined and (matchPattern w[5] pattern:"*SkyRig: *") do windows.sendMessage w[1] 0x0010 0 0
+try (destroyDialog SRS_ColorRoll) catch()
+rollout SRS_ColorRoll "SkyRig color" width:60 height:36 (
+  colorPicker cp "" color:(color %f %f %f) modal:false title:"%s" width:40 height:20 pos:[10,8]
+  on cp changed c do (if SRS_cpPy != undefined do SRS_cpPy c)
+)
+createDialog SRS_ColorRoll pos:[-4000,-4000] style:#()
+windows.sendMessage SRS_ColorRoll.cp.hwnd[1] 0x201 1 0x000A000A
+windows.sendMessage SRS_ColorRoll.cp.hwnd[1] 0x202 0 0x000A000A
+ok
+''' % (r, g, b, t))
+
+
 class ColorSwatch(QtWidgets.QPushButton):
-    """Образец цвета: клик — выбор цвета, правый клик — значение по умолчанию. Сигнал color_changed(list[r, g, b])."""
+    """Образец цвета: клик — окно выбора цвета, выбранное в настройках 3ds Max (например Corona Improved Picker),
+    правый клик — значение по умолчанию. Значения — как в материале (MAXScript); образец и подсказка показывают
+    цвет так же, как 3ds Max (с гаммой). Сигнал color_changed(list[r, g, b])."""
 
     color_changed = QtCore.Signal(list)
+    color_live = QtCore.Signal(list)          # каждое изменение в открытом окне выбора цвета
 
     def __init__(self, rgb, default=None, title="Color", parent=None):
         super().__init__(parent)
-        self._rgb = list(rgb)
-        self._default = list(default if default is not None else rgb)
+        self._rgb = [float(c) for c in rgb]
+        self._default = [float(c) for c in (default if default is not None else rgb)]
         self._title = title
         self.setFixedHeight(20)
         self.setMinimumWidth(60)
@@ -2822,30 +3011,137 @@ class ColorSwatch(QtWidgets.QPushButton):
         return list(self._rgb)
 
     def set_rgb(self, rgb, emit=False):
-        rgb = [max(0, min(255, int(c))) for c in list(rgb)[:3]]
-        changed = rgb != self._rgb
+        rgb = [round(max(0.0, min(255.0, float(c))), 2) for c in list(rgb)[:3]]
+        changed = any(abs(a - b) > 1e-3 for a, b in zip(rgb, self._rgb))
         self._rgb = rgb
         self._paint()
         if emit and changed:
             self.color_changed.emit(list(rgb))
 
+    def _shown(self):
+        g = color_picker_gamma()
+        return [int(round(255.0 * (c / 255.0) ** (1.0 / g))) for c in self._rgb]
+
     def _paint(self):
-        r, g, b = self._rgb
+        r, g, b = self._shown()
         self.setText("")
         self.setToolTip("%s: %d, %d, %d\nClick to choose, right-click for the default." % (self._title, r, g, b))
         self.setStyleSheet("QPushButton { background-color: rgb(%d,%d,%d); border: 1px solid #8a8a8a; "
                            "border-radius: 3px; }" % (r, g, b))     # светлая рамка: образец виден и на сером фоне
 
     def _pick(self):
-        c = QtWidgets.QColorDialog.getColor(QtGui.QColor(*self._rgb), self, self._title)
-        if c.isValid():
-            self.set_rgb([c.red(), c.green(), c.blue()], emit=True)
+        try:
+            open_live_color_picker(self._rgb, self._title, self._on_live)   # немодальное: цвет меняется сразу
+            return
+        except Exception:
+            print("[SkyRig Studio] live color picker, falling back to the modal one:\n" + traceback.format_exc())
+        try:
+            c = rt.colorPickerDlg(rt.color(*self._rgb), self._title, alpha=False)   # окно выбора цвета 3ds Max
+        except Exception:
+            print("[SkyRig Studio] color picker:\n" + traceback.format_exc())
+            return
+        if c is None or c == rt.undefined:
+            return                                     # Cancel
+        self.set_rgb([float(c.r), float(c.g), float(c.b)], emit=True)
+
+    def _on_live(self, c):
+        rgb = [float(c.r), float(c.g), float(c.b)]
+        self.color_live.emit(rgb)
+        self.set_rgb(rgb, emit=True)
 
     def mousePressEvent(self, e):
         if e.button() == QtCore.Qt.RightButton:
             self.set_rgb(self._default, emit=True)
             return
         super().mousePressEvent(e)
+
+
+class MapSlot(QtWidgets.QPushButton):
+    """Слот карты рядом с образцом цвета (как «No Map» в материале). Карту можно перетащить из Slate Material
+    Editor; клик — выбор карты в Material/Map Browser; правый клик — меню. Сигнал map_picked(object | None)."""
+
+    map_picked = QtCore.Signal(object)
+
+    def __init__(self, title, parent=None):
+        super().__init__("No Map", parent)
+        self._title = title
+        self._map = None
+        self.setAcceptDrops(True)
+        self.setFixedWidth(92)
+        self.setFixedHeight(20)
+        self.setStyleSheet("QPushButton { font-size: 8pt; padding: 0 4px; }")
+        self.clicked.connect(self._browse)
+        self.setContextMenuPolicy(QtCore.Qt.CustomContextMenu)
+        self.customContextMenuRequested.connect(self._menu)
+        self._show()
+
+    def set_map(self, tex):
+        self._map = tex
+        self._show()
+
+    def _show(self):
+        if self._map is None:
+            self.setText("No Map")
+            self.setToolTip("%s map: none.\nDrag a map node here from the Slate Material Editor, click to pick a "
+                            "map, right-click for more." % self._title)
+        else:
+            name = str(self._map.name)
+            self.setText(self.fontMetrics().elidedText(name, QtCore.Qt.ElideRight, self.width() - 10))
+            self.setToolTip("%s map: %s (%s)\nDrag another map here to replace, right-click to clear or open it."
+                            % (self._title, name, str(rt.classOf(self._map))))
+
+    def _browse(self):
+        try:
+            tex = rt.materialBrowseDlg(rt.Name("maps"))
+        except Exception:
+            print("[SkyRig Studio] map browser:\n" + traceback.format_exc())
+            return
+        if tex is not None and tex != rt.undefined and rt.superClassOf(tex) == rt.textureMap:
+            self.map_picked.emit(tex)
+
+    def _menu(self, pos):
+        m = QtWidgets.QMenu(self)
+        a_sel = m.addAction("Use the map selected in Slate")
+        a_show = m.addAction("Show in Slate Material Editor")
+        a_show.setEnabled(self._map is not None)
+        m.addSeparator()
+        a_clr = m.addAction("Clear (No Map)")
+        a_clr.setEnabled(self._map is not None)
+        act = m.exec(self.mapToGlobal(pos))
+        if act == a_sel:
+            tex = slate_selected_texmap()
+            if tex is not None:
+                self.map_picked.emit(tex)
+        elif act == a_show and self._map is not None:
+            try:
+                show_in_slate(self._map)
+            except Exception:
+                print("[SkyRig Studio] show map:\n" + traceback.format_exc())
+        elif act == a_clr:
+            self.map_picked.emit(None)
+
+    # --- перетаскивание из редактора материалов ---
+    def dragEnterEvent(self, e):
+        e.acceptProposedAction()
+
+    def dragMoveEvent(self, e):
+        e.acceptProposedAction()
+
+    def dropEvent(self, e):
+        try:
+            alog("MAP DROP formats: %s" % ", ".join(e.mimeData().formats()))
+        except Exception:
+            pass
+        e.acceptProposedAction()
+        # Slate отдаёт перетаскивание своим способом, без данных для Qt; перетаскиваемый узел при этом выделен
+        QtCore.QTimer.singleShot(0, self._take_selected)
+
+    def _take_selected(self):
+        tex = slate_selected_texmap()
+        if tex is not None:
+            self.map_picked.emit(tex)
+        else:
+            self.map_picked.emit(False)                 # окно покажет подсказку
 
 
 # ==========================================================================
@@ -7149,15 +7445,6 @@ class SafeEnvironment(QtWidgets.QWidget):
         row.addWidget(b)
         v.addLayout(row)
 
-        self.cmb_fog_preset = QtWidgets.QComboBox()
-        self.cmb_fog_preset.addItem("Fog preset…")
-        for name, _d in FOG_PRESETS:
-            self.cmb_fog_preset.addItem(name)
-        self.cmb_fog_preset.setToolTip("Applies ready values to the selected fog (color and density; "
-                                       "the rest stays as it is).")
-        self.cmb_fog_preset.activated.connect(self._on_fog_preset)
-        v.addWidget(self.cmb_fog_preset)
-
         ff = QtWidgets.QFormLayout()
         ff.setContentsMargins(0, 0, 0, 0)
         self._ff = ff
@@ -7176,16 +7463,34 @@ class SafeEnvironment(QtWidgets.QWidget):
         self.chk_fog_single = ToggleSwitch("Single bounce only")
         self.chk_fog_single.setToolTip("Only one scattering bounce: much faster and less noisy; "
                                        "enough for most fogs and haze.")
+        self.ms_fog = {}
+
+        def color_row(sw, key, title):
+            ms = MapSlot(title)
+            ms.map_picked.connect(lambda tex, k=key: self._fog_map_picked(k, tex))
+            self.ms_fog[key] = ms
+            row_ = QtWidgets.QWidget()
+            hl_ = QtWidgets.QHBoxLayout(row_)
+            hl_.setContentsMargins(0, 0, 0, 0)
+            hl_.setSpacing(4)
+            sw.setFixedWidth(56)                        # короткий образец, слот карты сразу за ним
+            hl_.addWidget(sw)
+            hl_.addWidget(ms)
+            hl_.addStretch(1)
+            return row_
+
+        self._row_fog_abs = color_row(self.sw_fog_abs, "abs", "Absorption")
+        self._row_fog_scat = color_row(self.sw_fog_scat, "scat", "Scattering")
         ff.addRow("Distance", self.sp_fog_dist)
-        ff.addRow("Absorption", self.sw_fog_abs)
-        ff.addRow("Scattering", self.sw_fog_scat)
+        ff.addRow("Absorption", self._row_fog_abs)
+        ff.addRow("Scattering", self._row_fog_scat)
         ff.addRow("Directionality", self.sp_fog_dir)
         ff.addRow(self.chk_fog_single)
         # Expert
         self.sw_fog_emis = ColorSwatch(FOG_DEFAULTS["emis_color"], title="Emission color")
         self.sp_fog_edist = make_spin(0, 1000000, 10, 1, " m", default=0.0, pixel_divider=2.0)
         self.sp_fog_edist.setToolTip("Emission distance: the fog glows by itself. 0 = no emission.")
-        self.sp_fog_step = make_spin(0.001, 1000, 0.01, 3, " m", default=FOG_DEFAULTS["step"])
+        self.sp_fog_step = make_spin(0.01, 100000, 0.1, 2, " cm", default=FOG_DEFAULTS["step"] * 100.0)   # как в Corona: см
         self.sp_fog_step.setToolTip("Step size for maps in the volume. Smaller = more detail, slower. "
                                     "Does not matter for a fog without maps.")
         self.cmb_fog_mapping = QtWidgets.QComboBox()
@@ -7194,50 +7499,32 @@ class SafeEnvironment(QtWidgets.QWidget):
         self.cmb_fog_alpha = QtWidgets.QComboBox()
         self.cmb_fog_alpha.addItems(["Default", "Always black", "Always white"])
         self.cmb_fog_alpha.setToolTip("How the fog appears in the alpha channel.")
-        self.chk_fog_mix = ToggleSwitch("Allow mixing with other volumes")
-        self.chk_fog_caus = ToggleSwitch("Enable caustics")
-        maps = QtWidgets.QHBoxLayout()
-        maps.setSpacing(6)
-        self.chk_fog_absmap = QtWidgets.QCheckBox("Absorb.")
-        self.chk_fog_scatmap = QtWidgets.QCheckBox("Scatter")
-        self.chk_fog_emismap = QtWidgets.QCheckBox("Emission")
-        for c_ in (self.chk_fog_absmap, self.chk_fog_scatmap, self.chk_fog_emismap):
-            c_.setToolTip("Use the map in this color slot (maps are set in the Material Editor).")
-            maps.addWidget(c_)
-        maps.addStretch(1)
-        self._w_fog_maps = QtWidgets.QWidget()
-        self._w_fog_maps.setLayout(maps)
-        maps.setContentsMargins(0, 0, 0, 0)
         self.chk_fog_emis_show = ToggleSwitch("Emission settings")
-        self.chk_fog_emis_show.setToolTip("Show the emission parameters (the fog glowing by itself). Hidden by "
-                                          "default; shown automatically when the fog has emission.")
+        self.chk_fog_emis_show.setToolTip("Show the emission parameters (the fog glowing by itself). Off every "
+                                          "time the window opens.")
+        self.chk_fog_emis_show.setChecked(False)
         self.chk_fog_emis_show.toggled.connect(lambda _on: self._show_emis_rows())
+        self._row_fog_emis = color_row(self.sw_fog_emis, "emis", "Emission")
         ff.addRow(self.chk_fog_emis_show)
-        ff.addRow("Emission", self.sw_fog_emis)
+        ff.addRow("Emission", self._row_fog_emis)
         ff.addRow("Emission dist.", self.sp_fog_edist)
         ff.addRow("Step size", self.sp_fog_step)
         ff.addRow("Map mode", self.cmb_fog_mapping)
         ff.addRow("Alpha", self.cmb_fog_alpha)
-        ff.addRow("Use maps", self._w_fog_maps)
-        ff.addRow(self.chk_fog_mix)
-        ff.addRow(self.chk_fog_caus)
-        self._fog_adv_rows = [self.chk_fog_emis_show, self.sp_fog_step, self.cmb_fog_mapping,
-                              self.cmb_fog_alpha, self._w_fog_maps, self.chk_fog_mix, self.chk_fog_caus]
+        self._fog_adv_rows = [self.chk_fog_emis_show, self.sp_fog_step, self.cmb_fog_mapping, self.cmb_fog_alpha]
         self._w_fog_params = QtWidgets.QWidget()
         self._w_fog_params.setLayout(ff)
         v.addWidget(self._w_fog_params)
         for sp in (self.sp_fog_dist, self.sp_fog_dir, self.sp_fog_edist, self.sp_fog_step):
             sp.valueChanged.connect(self._on_fog_setting)
-        for sw in (self.sw_fog_abs, self.sw_fog_scat, self.sw_fog_emis):
+        for sw, key in ((self.sw_fog_abs, "abs_color"), (self.sw_fog_scat, "scat_color"), (self.sw_fog_emis, "emis_color")):
+            sw.color_live.connect(lambda rgb, k=key: self._fog_live_color(k, rgb))   # Interactive — сразу
             sw.color_changed.connect(self._on_fog_setting)
-        for t_ in (self.chk_fog_single, self.chk_fog_mix, self.chk_fog_caus, self.chk_fog_absmap,
-                   self.chk_fog_scatmap, self.chk_fog_emismap):
-            t_.toggled.connect(self._on_fog_setting)
+        self.chk_fog_single.toggled.connect(self._on_fog_setting)
         for c_ in (self.cmb_fog_mapping, self.cmb_fog_alpha):
             c_.currentIndexChanged.connect(self._on_fog_setting)
-        self.b_fog_medit = QtWidgets.QPushButton("Open in Material Editor")
-        self.b_fog_medit.setToolTip("Puts the selected fog into the Compact Material Editor (last slot): "
-                                    "there you can add maps to the color slots.")
+        self.b_fog_medit = QtWidgets.QPushButton("Open in Slate Material Editor")
+        self.b_fog_medit.setToolTip("Shows the selected fog as a node in the Slate Material Editor and opens its parameters.")
         self.b_fog_medit.clicked.connect(self.fog_open_medit)
         v.addWidget(self.b_fog_medit)
 
@@ -7261,7 +7548,7 @@ class SafeEnvironment(QtWidgets.QWidget):
         """Emission тумана: только в Expert и только при включённом «Emission settings»."""
         try:
             on = (not bool(self.lib.ui_simple)) and self.chk_fog_emis_show.isChecked()
-            self._ff.setRowVisible(self.sw_fog_emis, on)
+            self._ff.setRowVisible(self._row_fog_emis, on)
             self._ff.setRowVisible(self.sp_fog_edist, on)
         except Exception:
             pass
@@ -7294,16 +7581,15 @@ class SafeEnvironment(QtWidgets.QWidget):
         return dict(abs_color=self.sw_fog_abs.rgb(), distance=self.sp_fog_dist.value(),
                     scat_color=self.sw_fog_scat.rgb(), directionality=self.sp_fog_dir.value(),
                     single_bounce=self.chk_fog_single.isChecked(), emis_color=self.sw_fog_emis.rgb(),
-                    emis_distance=self.sp_fog_edist.value(), abs_map_on=self.chk_fog_absmap.isChecked(),
-                    scat_map_on=self.chk_fog_scatmap.isChecked(), emis_map_on=self.chk_fog_emismap.isChecked(),
-                    step=self.sp_fog_step.value(), mapping=self.cmb_fog_mapping.currentIndex(),
-                    alpha=self.cmb_fog_alpha.currentIndex(), mixing=self.chk_fog_mix.isChecked(),
-                    caustics=self.chk_fog_caus.isChecked())
+                    emis_distance=self.sp_fog_edist.value(), step=self.sp_fog_step.value() / 100.0,
+                    mapping=self.cmb_fog_mapping.currentIndex(), alpha=self.cmb_fog_alpha.currentIndex())
 
-    def _fog_show_values(self, d):
-        d = dict(FOG_DEFAULTS, **(d or {}))
+    def _fog_show_values(self, d, mtl=None):
+        d = dict(FOG_DEFAULTS, **{k: v for k, v in (d or {}).items() if k in FOG_DEFAULTS})
         self._fog_busy = True
         try:
+            for key, ms in self.ms_fog.items():
+                ms.set_map(fog_get_map(mtl, key) if mtl is not None else None)
             self.sp_fog_dist.setValue(float(d["distance"]))
             self.sw_fog_abs.set_rgb(d["abs_color"])
             self.sw_fog_scat.set_rgb(d["scat_color"])
@@ -7311,18 +7597,32 @@ class SafeEnvironment(QtWidgets.QWidget):
             self.chk_fog_single.setChecked(bool(d["single_bounce"]))
             self.sw_fog_emis.set_rgb(d["emis_color"])
             self.sp_fog_edist.setValue(float(d["emis_distance"]))
-            if float(d["emis_distance"]) > 0 and not self.chk_fog_emis_show.isChecked():
-                self.chk_fog_emis_show.setChecked(True)      # у тумана есть свечение — показать его параметры
-            self.sp_fog_step.setValue(max(0.001, float(d["step"])))
+            self.sp_fog_step.setValue(max(0.01, float(d["step"]) * 100.0))   # хранится в метрах, показывается в см
             self.cmb_fog_mapping.setCurrentIndex(max(0, min(1, int(d["mapping"]))))
             self.cmb_fog_alpha.setCurrentIndex(max(0, min(2, int(d["alpha"]))))
-            self.chk_fog_mix.setChecked(bool(d["mixing"]))
-            self.chk_fog_caus.setChecked(bool(d["caustics"]))
-            self.chk_fog_absmap.setChecked(bool(d["abs_map_on"]))
-            self.chk_fog_scatmap.setChecked(bool(d["scat_map_on"]))
-            self.chk_fog_emismap.setChecked(bool(d["emis_map_on"]))
         finally:
             self._fog_busy = False
+
+    def _fog_map_picked(self, key, tex):
+        """Карта для слота цвета выбранного тумана: перетащена из Slate, выбрана в браузере или очищена (None).
+        False — перетаскивание, из которого карту получить не удалось."""
+        n = self._fog_cur()
+        if not n:
+            self._status("Create a fog first (+).", error=True)
+            return
+        if tex is False:
+            self._status("Could not get the map from this drag. Drag a map node from the Slate Material Editor "
+                         "(it becomes selected there), or click the slot to pick a map.", error=True)
+            return
+        reg, mats = self._fog_all()
+        m = self._fog_material(n, reg, mats)            # нужен сам материал: карта живёт в нём
+        title = {"abs": "Absorption", "scat": "Scattering", "emis": "Emission"}[key]
+        self._run("fog map", lambda: (fog_set_map(m, key, tex), True)[1])
+        self.ms_fog[key].set_map(fog_get_map(m, key))
+        if tex is None:
+            self._status("Fog “%s”: %s map removed." % (n, title))
+        else:
+            self._status("Fog “%s”: %s map “%s”." % (n, title, str(tex.name)))
 
     def _fog_material(self, name, reg, mats):
         """Материал тумана: тот, что уже стоит в слотах (общий для всех слотов), иначе новый из реестра."""
@@ -7332,6 +7632,10 @@ class SafeEnvironment(QtWidgets.QWidget):
             m.name = FOG_PREFIX + name
             fog_write(m, dict(FOG_DEFAULTS, **reg["fogs"].get(name, {})))
             mats[name] = m
+        try:
+            fog_lib_add(m)                               # хранится в сцене, даже если нигде не назначен
+        except Exception:
+            print("[SkyRig Studio] fog library:\n" + traceback.format_exc())
         return m
 
     # --- синхронизация с окном ---
@@ -7339,6 +7643,8 @@ class SafeEnvironment(QtWidgets.QWidget):
         """Список туманов, параметры выбранного и строки назначения — из сцены."""
         if not hasattr(self, "cmb_fog"):
             return
+        if getattr(self, "_fog_pending", None):         # сначала дописать отложенную правку
+            self._fog_flush()
         self._fog_busy = True
         try:
             reg, mats = self._fog_all()
@@ -7359,13 +7665,16 @@ class SafeEnvironment(QtWidgets.QWidget):
                 self.cmb_fog.addItem("No fog yet: press +", None)
             for n in names:
                 users = self._fog_users(n)
-                self.cmb_fog.addItem(n + (("  ·  " + ", ".join(users)) if users else "  ·  not used"), n)
+                # в списке — только имя (где туман используется, видно ниже, в «Where the fog is used»)
+                self.cmb_fog.addItem(n if users else n + "  (not used)", n)
+                self.cmb_fog.setItemData(self.cmb_fog.count() - 1,
+                                         ("Used in: " + ", ".join(users)) if users else "Not used anywhere yet",
+                                         QtCore.Qt.ToolTipRole)
             if cur:
                 self.cmb_fog.setCurrentIndex(max(0, self.cmb_fog.findData(cur)))
             self._w_fog_params.setEnabled(bool(cur))
-            self.cmb_fog_preset.setEnabled(bool(cur))
             self.b_fog_medit.setEnabled(bool(cur))
-            self._fog_show_values(reg["fogs"].get(cur) if cur else None)
+            self._fog_show_values(reg["fogs"].get(cur) if cur else None, mats.get(cur) if cur else None)
             self._fog_build_assign(names)
         except Exception:
             print("[SkyRig Studio] fog sync:\n" + traceback.format_exc())
@@ -7384,8 +7693,15 @@ class SafeEnvironment(QtWidgets.QWidget):
 
     def _fog_build_assign(self, names):
         f = self._fog_assign_form
+        # Старые строки не удаляем сразу (removeRow): список, из которого пришёл выбор, ещё обрабатывает своё
+        # событие, и мгновенное удаление роняет 3ds Max. Снимаем строки и удаляем виджеты позже (deleteLater).
         while f.rowCount():
-            f.removeRow(0)
+            r = f.takeRow(0)
+            for it in (r.labelItem, r.fieldItem):
+                w_ = it.widget() if it is not None else None
+                if w_ is not None:
+                    w_.hide()
+                    w_.deleteLater()
         slots = fog_slots()
         if not slots:
             f.addRow(QtWidgets.QLabel("Current renderer is not Corona."))
@@ -7430,21 +7746,53 @@ class SafeEnvironment(QtWidgets.QWidget):
         reg = self._fog_reg()
         reg["sel"] = n
         self._fog_reg_save(reg)
-        self._fog_sync(select=n)
+        QtCore.QTimer.singleShot(0, lambda: self._fog_sync(select=n))   # после того, как список закончит событие
 
     def _on_fog_setting(self, *_):
+        """Правка параметра. Запись в материал — с задержкой 150 мс: при перетаскивании счётчика сцена (и Corona
+        Interactive) получает одно изменение, а не десятки в секунду."""
         if self._fog_busy or getattr(self, "_loading", False):
             return
         n = self._fog_cur()
         if not n:
             return
-        d = self._fog_values()
+        self._fog_pending = (n, self._fog_values())
+        t = getattr(self, "_fog_timer", None)
+        if t is None:
+            t = self._fog_timer = QtCore.QTimer(self)
+            t.setSingleShot(True)
+            t.timeout.connect(self._fog_flush)
+        t.start(150)
+
+    def _fog_live_color(self, key, rgb):
+        """Цвет из открытого окна выбора цвета — прямо в материал тумана, без задержки (если туман уже в сцене)."""
+        n = self._fog_cur()
+        if not n or self._fog_busy:
+            return
+        m = fog_materials().get(n)
+        if m is not None:
+            try:
+                fog_write(m, {key: rgb})
+            except Exception:
+                pass
+
+    def _fog_flush(self):
+        pend, self._fog_pending = getattr(self, "_fog_pending", None), None
+        if not pend:
+            return
+        n, d = pend
         reg, mats = self._fog_all()
+        m = mats.get(n)
+        old = reg["fogs"].get(n, {})
         reg["fogs"][n] = d
         self._fog_reg_save(reg)
-        m = mats.get(n)
         if m is not None:
-            self._run("fog settings", lambda: (fog_write(m, d), True)[1])
+            # только изменившиеся свойства: лишние записи (режимы, каустика, смешивание) во время Interactive
+            # заставляют Corona пересобирать объёмы
+            cur = fog_read(m)
+            diff = {k: v for k, v in d.items() if not _state_equal(cur.get(k), v, 1e-4)}
+            if diff:
+                self._run("fog settings", lambda: (fog_write(m, diff), True)[1])
         self._refresh_state()
 
     def _ask_fog_name(self, title, text, default):
@@ -7463,9 +7811,10 @@ class SafeEnvironment(QtWidgets.QWidget):
 
     def fog_new(self):
         reg, _m = self._fog_all()
-        cam = active_corona_cam()
-        base = ("Fog " + str(cam.name)) if cam is not None else "Fog"
-        name = self._ask_fog_name("New fog", "Fog name:", self._free_fog_name(base, reg))
+        i = 1
+        while "Fog %d" % i in reg["fogs"]:
+            i += 1
+        name = self._ask_fog_name("New fog", "Fog name:", "Fog %d" % i)
         if not name:
             return
         if name in reg["fogs"]:
@@ -7473,10 +7822,11 @@ class SafeEnvironment(QtWidgets.QWidget):
             return
         reg["fogs"][name] = dict(FOG_DEFAULTS)
         reg["sel"] = name
+        self._run("new fog", lambda: (self._fog_material(name, reg, _m), True)[1])   # материал сразу в сцене
         self._fog_reg_save(reg)
         self._fog_sync(select=name)
-        self._status("Fog “%s” created (Morning mist values). Choose below where it is used: Global and/or "
-                     "a camera." % name)
+        self._status("Fog “%s” created with the CoronaVolumeMtl defaults (Distance 0 = no fog yet: set Distance "
+                     "and colors). Choose below where it is used: Global and/or a camera." % name)
 
     def fog_duplicate(self):
         n = self._fog_cur()
@@ -7491,6 +7841,18 @@ class SafeEnvironment(QtWidgets.QWidget):
             return
         reg["fogs"][name] = dict(reg["fogs"].get(n, FOG_DEFAULTS))
         reg["sel"] = name
+        src = _m.get(n)
+
+        def do():
+            if src is not None:                              # копия материала — вместе с картами
+                c = rt.copy(src)
+                c.name = FOG_PREFIX + name
+                fog_lib_add(c)
+            else:
+                self._fog_material(name, reg, _m)
+            return True
+
+        self._run("duplicate fog", do)
         self._fog_reg_save(reg)
         self._fog_sync(select=name)
         self._status("Fog “%s” is a copy of “%s” and is not used yet: assign it below." % (name, n))
@@ -7530,6 +7892,8 @@ class SafeEnvironment(QtWidgets.QWidget):
             for key, obj in fog_slots():
                 if fog_slot_get(obj)[0] == n:
                     fog_slot_set(obj, None, FOG_NONE if key == "global" else FOG_GLOBAL)
+            if _m.get(n) is not None:
+                fog_lib_remove(_m[n])
             return True
 
         self._run("delete fog", do)
@@ -7538,22 +7902,6 @@ class SafeEnvironment(QtWidgets.QWidget):
         self._fog_reg_save(reg)
         self._fog_sync()
         self._status("Fog “%s” deleted." % n)
-
-    def _on_fog_preset(self, idx):
-        self.cmb_fog_preset.setCurrentIndex(0)
-        if idx <= 0:
-            return
-        name, vals = FOG_PRESETS[idx - 1]
-        n = self._fog_cur()
-        if not n:
-            self._status("Create a fog first (+).", error=True)
-            return
-        d = self._fog_values()
-        d.update(vals)
-        self._fog_show_values(d)
-        self._on_fog_setting()
-        self._fog_sync(select=n)
-        self._status("Fog “%s”: preset “%s” applied." % (n, name))
 
     def _fog_assign(self, key, value):
         obj = dict(fog_slots()).get(key)
@@ -7568,7 +7916,7 @@ class SafeEnvironment(QtWidgets.QWidget):
                 self, WINDOW_TITLE, "%s holds your own material “%s”.\nReplace it?\n\nYou can undo with Ctrl+Z."
                 % (where, str(m_old.name) if m_old is not None else "?"))
             if r != QtWidgets.QMessageBox.Yes:
-                self._fog_sync()
+                QtCore.QTimer.singleShot(0, self._fog_sync)
                 return
         reg, mats = self._fog_all()
         mtl = self._fog_material(value, reg, mats) if value not in (FOG_NONE, FOG_GLOBAL) else None
@@ -7576,7 +7924,8 @@ class SafeEnvironment(QtWidgets.QWidget):
         if value not in (FOG_NONE, FOG_GLOBAL):
             reg["sel"] = value
             self._fog_reg_save(reg)
-        self._fog_sync(select=value if value not in (FOG_NONE, FOG_GLOBAL) else None)
+        sel = value if value not in (FOG_NONE, FOG_GLOBAL) else None
+        QtCore.QTimer.singleShot(0, lambda: self._fog_sync(select=sel))   # строки пересобираются после события списка
         what = {FOG_NONE: "no fog", FOG_GLOBAL: "global fog"}.get(value, "fog “%s”" % value)
         self._status("%s: %s." % (where[0].upper() + where[1:], what))
 
@@ -7587,14 +7936,12 @@ class SafeEnvironment(QtWidgets.QWidget):
         reg, mats = self._fog_all()
         m = self._fog_material(n, reg, mats)
         try:
-            rt.MatEditor.mode = rt.Name("basic")
-            rt.meditMaterials[23] = m
-            rt.MatEditor.Open()
-            rt.activeMeditSlot = 24
-            self._status("Fog “%s” is in the last slot of the Compact Material Editor%s." % (
+            show_in_slate(m)
+            self._status("Fog “%s” is open in the Slate Material Editor%s." % (
                 n, "" if self._fog_users(n) else " (it is not used in the scene yet)"))
         except Exception:
-            print("[SkyRig Studio] fog medit:\n" + traceback.format_exc())
+            print("[SkyRig Studio] fog in Slate:\n" + traceback.format_exc())
+            self._status("Could not open the Slate Material Editor (details in Listener).", error=True)
 
     def _fog_snapshot(self):
         """Все туманы и назначения — для пресетов освещения."""
@@ -7837,8 +8184,8 @@ class SafeEnvironment(QtWidgets.QWidget):
         self.sp_cl_seed.setValue(float(random.randint(1, 99999)))
 
     def _card(self, title, key):
-        if key in CARDS_COLLAPSED_BY_DEFAULT:      # свёрнута, пока пользователь сам её не развернёт
-            collapsed = key not in self.lib.ui_expanded
+        if key in CARDS_COLLAPSED_BY_DEFAULT:      # при каждом открытии окна — свёрнута
+            collapsed = True
         else:
             collapsed = key in self.lib.ui_collapsed
         card = CollapsibleCard(title, key, collapsed=collapsed)
@@ -7848,10 +8195,7 @@ class SafeEnvironment(QtWidgets.QWidget):
     def _on_card_toggled(self, key, collapsed):
         try:
             if key in CARDS_COLLAPSED_BY_DEFAULT:
-                cur = [k for k in self.lib.ui_expanded if k != key]
-                if not collapsed:
-                    cur.append(key)
-                self.lib.ui_expanded = cur
+                return                             # состояние не запоминается: окно всегда открывается со свёрнутой
             else:
                 cur = [k for k in self.lib.ui_collapsed if k != key]
                 if collapsed:

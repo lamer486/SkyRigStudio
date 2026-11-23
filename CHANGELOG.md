@@ -1,5 +1,14 @@
 # История версий
 
+## v0.82 — 2026-11-23
+- Fix: 3ds Max could crash right after choosing a fog for a camera
+- Fix: “No fog” for a camera really removes the fog (an empty SRS_NoFog volume; Corona ignores an empty override slot)
+- Fog defaults are exactly those of a new CoronaVolumeMtl (Absorption 186 on screen, Distance 0, Scattering black, Directionality 0, Step size 1 cm)
+- Map slots next to the Absorption / Scattering / Emission colors: drag a map from the Slate Material Editor, click to pick one, right-click to clear
+- Color swatches open the 3ds Max color picker (e.g. Corona Improved Picker) without blocking: Interactive updates while you pick
+- “Open in Slate Material Editor”; fogs are kept in the scene even when not assigned
+- Simpler fog section: always collapsed when the window opens, Emission settings off, no built-in fog presets, no Allow mixing / Enable caustics, short fog names
+
 ## v0.81 — 2026-11-23
 - Fog section: any number of independent fogs (CoronaVolumeMtl) with all their parameters; one global fog (Global volume material) and/or a separate fog or no fog for each Corona camera (Global volume override); fog presets; lighting presets save fogs and camera assignments. Collapsed by default
 - Switching maps (Prev / Next, library) searches the sun only when “Link azimuth to HDRI” is on: fast browsing on heavy scenes
