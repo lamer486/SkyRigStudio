@@ -52,7 +52,7 @@ import pymxs
 from PySide6 import QtWidgets, QtCore, QtGui
 import qtmax
 
-VERSION = "0.82"
+VERSION = "0.83"
 WINDOW_TITLE = "SkyRig Studio v" + VERSION
 COPYRIGHT_TEXT = "Script created with the help of Claude AI by Vasiliy Kanevskiy, 2026."
 CONTACT_EMAIL = "kanevskiy.vasiliy@gmail.com"
@@ -774,7 +774,9 @@ class PresetStore:
                 d = json.load(fh)
         except Exception as ex:
             raise ValueError("could not read file: %s" % ex)
-        if not isinstance(d, dict) or d.get("format") != PRESETS_FORMAT or not isinstance(d.get("presets"), dict):
+        ours = isinstance(d, dict) and isinstance(d.get("presets"), dict) and (
+            d.get("format") == PRESETS_FORMAT or ("format" not in d and "version" in d))   # + общий presets.json до 0.83
+        if not ours:
             raise ValueError("this is not a SkyRig Studio presets file")
         return {n: v for n, v in d["presets"].items() if isinstance(n, str) and isinstance(v, dict)}
 
@@ -798,6 +800,116 @@ class PresetStore:
             self.presets[name] = p
             added += 1
         return added, replaced, skipped
+
+
+_SCENE_PRESETS_DEF = None
+
+
+def _scene_presets_ca(create=False):
+    """Атрибут корневого узла сцены, где хранятся пресеты освещения этой сцены (JSON-строка)."""
+    global _SCENE_PRESETS_DEF
+    rn = rt.rootNode
+    try:
+        for i in range(1, int(rt.custAttributes.count(rn)) + 1):
+            ca = rt.custAttributes.get(rn, i)
+            if ca is not None and str(ca.name) == "SRS_ScenePresets":
+                return ca
+    except Exception:
+        pass
+    if not create:
+        return None
+    if _SCENE_PRESETS_DEF is None:
+        _SCENE_PRESETS_DEF = rt.execute('attributes SRS_ScenePresets attribID:#(0x6b42d8f3, 0x2c3a0e55) '
+                                        '( parameters main ( json type:#string default:"" ) )')
+    rt.custAttributes.add(rn, _SCENE_PRESETS_DEF)
+    return _scene_presets_ca(False)
+
+
+def scene_presets_sidecar():
+    """«<папка сцены>\\<имя сцены>.presets.json» или None, если сцена ещё не сохранена."""
+    try:
+        folder, name = str(rt.maxFilePath), str(rt.maxFileName)
+    except Exception:
+        return None
+    if not folder or not name:
+        return None
+    return os.path.join(folder, os.path.splitext(name)[0] + ".presets.json")
+
+
+class ScenePresetStore(PresetStore):
+    """Пресеты освещения открытой сцены: хранятся в самом .max (атрибут корневого узла) и при каждом изменении
+    дублируются в файл «<имя сцены>.presets.json» рядом со сценой. В новой сцене список пустой.
+    Если в сцене пресетов нет совсем (сцена из версии до 0.83 или закрыта без сохранения), а файл рядом есть —
+    пресеты берутся из него."""
+
+    def __init__(self):
+        self.path = None
+        self.presets = {}
+        self.source = ""
+        self._last_raw = None
+        self._scene = None
+        self.reload()
+
+    @staticmethod
+    def _raw():
+        ca = _scene_presets_ca(False)
+        if ca is None:
+            return None
+        try:
+            return str(ca.json)
+        except Exception:
+            return None
+
+    def _scene_key(self):
+        try:
+            return (str(rt.maxFilePath), str(rt.maxFileName))
+        except Exception:
+            return None
+
+    def reload(self):
+        raw = self._raw()
+        self._last_raw = raw
+        self._scene = self._scene_key()
+        self.presets, self.source = {}, ""
+        if raw:
+            try:
+                d = json.loads(raw)
+                p = d.get("presets") if isinstance(d, dict) else None
+                if isinstance(p, dict):
+                    self.presets = {n: v for n, v in p.items() if isinstance(n, str) and isinstance(v, dict)}
+                    self.source = "scene"
+            except Exception:
+                print("[SkyRig Studio] scene presets:\n" + traceback.format_exc())
+            return
+        if raw is None:                               # в сцене пресетов ещё не было — файл рядом со сценой
+            sc = scene_presets_sidecar()
+            if sc and os.path.isfile(sc):
+                try:
+                    self.presets = self.read_backup(sc)
+                    self.source = "file"
+                except Exception:
+                    print("[SkyRig Studio] presets file next to the scene:\n" + traceback.format_exc())
+
+    def scene_changed(self):
+        """Открыли другую сцену / New / Reset, или пресеты сцены изменились не через это окно."""
+        return self._scene_key() != self._scene or self._raw() != self._last_raw
+
+    def save(self):
+        data = {"format": PRESETS_FORMAT, "version": 1, "presets": self.presets}
+        raw = json.dumps(data, ensure_ascii=False)
+        ca = _scene_presets_ca(True)
+        ca.json = raw
+        self._last_raw = self._raw()
+        self.source = "scene"
+        self.write_sidecar()
+
+    def write_sidecar(self):
+        """Копия пресетов рядом со сценой; возвращает путь или None (сцена не сохранена)."""
+        sc = scene_presets_sidecar()
+        if not sc:
+            return None
+        save_json(sc, {"format": PRESETS_FORMAT, "version": 1, "presets": self.presets})
+        return sc
 
 
 class SunCache:
@@ -4773,7 +4885,7 @@ class BackupDialog(QtWidgets.QDialog):
             restore_everything(self.lib, path)
             _reload_in_place(self.lib, Library)
             if self.presets is not None:
-                _reload_in_place(self.presets, PresetStore)
+                _reload_in_place(self.presets, type(self.presets))   # пресеты сцены — из сцены
             if self.sun_cache is not None:
                 _reload_in_place(self.sun_cache, SunCache)
             done = restore_missing_thumbs(self.lib)
@@ -6503,12 +6615,34 @@ class SafeEnvironment(QtWidgets.QWidget):
         self._last_enter_sync = 0.0
         self._busy = False
         self.lib = Library()
-        self.presets = PresetStore()
+        self.presets = ScenePresetStore()       # с 0.83 — пресеты этой сцены (в .max + файл рядом со сценой)
         self.sun_cache = SunCache()
         self._build_ui()
         disable_default_buttons(self)
         self._refresh_presets()
         self.sync_from_scene()
+        QtCore.QTimer.singleShot(800, self._legacy_presets_note)
+
+    def _legacy_presets_note(self):
+        """Один раз после перехода на пресеты сцены: где остались пресеты прежних версий."""
+        marker = os.path.join(DATA_DIR, "scene_presets_note.txt")
+        if os.path.exists(marker):
+            return
+        try:
+            d = load_json(PRESET_FILE, {})
+            n = len(d.get("presets", {})) if isinstance(d, dict) and isinstance(d.get("presets"), dict) else 0
+            with open(marker, "w", encoding="utf-8") as fh:
+                fh.write("shown\n")
+        except Exception:
+            return
+        if n:
+            QtWidgets.QMessageBox.information(
+                self, WINDOW_TITLE,
+                "Lighting presets now belong to the scene: each .max keeps its own list (and a copy in "
+                "“SceneName.presets.json” next to it). A new scene starts with an empty list.\n\n"
+                "Your %d presets from earlier versions are not lost: they stay in\n%s\n\n"
+                "To bring some of them into a scene: Lighting presets → From file... (Expert mode) → choose that "
+                "file." % (n, PRESET_FILE))
 
     # ---------- общие утилиты ----------
     @staticmethod
@@ -7297,17 +7431,16 @@ class SafeEnvironment(QtWidgets.QWidget):
         b_pexp.setToolTip("Save presets to a file to move them to another scene or computer.")
         b_pexp.clicked.connect(self.export_presets)
         b_pimp = QtWidgets.QPushButton("From file...")
-        b_pimp.setToolTip("Load presets from a file saved with the “To file...” button.")
+        b_pimp.setToolTip("Load presets from a file: “SceneName.presets.json” of another project, a file saved with "
+                          "“To file...”, or presets.json of versions before 0.83.")
         b_pimp.clicked.connect(self.import_presets)
         grid.addWidget(b_pexp, 2, 0)
         grid.addWidget(b_pimp, 2, 1)
-        b_pscene = QtWidgets.QPushButton("Save next to scene")
-        b_pscene.setToolTip("No dialogs: all presets are saved to the folder of the open scene in the file\n"
-                            "“SceneName.presets.json”. Pressing again overwrites this file.\n"
-                            "To load back: “From file...”.")
-        b_pscene.clicked.connect(self.save_presets_beside_scene)
-        grid.addWidget(b_pscene, 3, 0, 1, 2)
         pl.addLayout(grid)
+        self.lbl_presets_where = QtWidgets.QLabel("")
+        self.lbl_presets_where.setWordWrap(True)
+        self.lbl_presets_where.setStyleSheet("color: #9a9a9a; font-size: 8pt;")
+        pl.addWidget(self.lbl_presets_where)
         root.addWidget(gp)
 
         self.lbl_state = QtWidgets.QLabel("")
@@ -7407,7 +7540,7 @@ class SafeEnvironment(QtWidgets.QWidget):
                            (self._fk, self.lbl_sky_target), (self._fk, self.sp_sky_cam),
                            (self._fk, self.sp_sky_refl), (self._fk, self.sp_sky_refr)]
         self._adv_items += [(self._ff, w_) for w_ in self._fog_adv_rows]
-        self._adv_widgets = [b_pexp, b_pimp, b_pscene, self._card_compass, self.b_fog_medit]
+        self._adv_widgets = [b_pexp, b_pimp, self._card_compass, self.b_fog_medit]
         no_wheel(*self.findChildren(QtWidgets.QComboBox))   # прокрутка окна не меняет значения списков
         self._apply_mode()
         self._apply_env_ui()
@@ -9134,6 +9267,47 @@ class SafeEnvironment(QtWidgets.QWidget):
             i = self.cmb_presets.findText(select)
             if i >= 0:
                 self.cmb_presets.setCurrentIndex(i)
+        self._presets_where()
+
+    def _presets_where(self):
+        """Подпись под пресетами: где они хранятся."""
+        try:
+            sc = scene_presets_sidecar()
+            n = len(self.presets.presets)
+            if sc is None:
+                txt = ("Presets of this scene (%d), stored in the scene. Save the scene to also keep a copy "
+                       "next to it." % n) if n else "No presets in this scene yet. They are stored in the scene."
+                tip = ""
+            else:
+                fn = os.path.basename(sc)
+                txt = ("Presets of this scene (%d). Saved in the scene and in “%s” next to it." % (n, fn)) if n \
+                    else "No presets in this scene yet. They will be saved in the scene and in “%s”." % fn
+                tip = sc
+            if getattr(self.presets, "source", "") == "file":
+                txt += " Loaded from the file next to the scene (the scene had none)."
+            self.lbl_presets_where.setText(txt)
+            self.lbl_presets_where.setToolTip(tip)
+        except Exception:
+            pass
+
+    def _presets_follow_scene(self):
+        """Открыта другая сцена (или New / Reset) — список пресетов этой сцены; сцену впервые сохранили —
+        записать копию пресетов рядом с ней."""
+        try:
+            if self.presets.scene_changed():
+                self.presets.reload()
+                self._active_preset = None
+                self._refresh_presets()
+                if self.presets.source == "file":
+                    self._status("Presets loaded from “%s” next to the scene." % os.path.basename(
+                        scene_presets_sidecar() or ""))
+            elif self.presets.presets:
+                sc = scene_presets_sidecar()
+                if sc and not os.path.isfile(sc):
+                    self.presets.write_sidecar()
+                    self._presets_where()
+        except Exception:
+            print("[SkyRig Studio] scene presets:\n" + traceback.format_exc())
 
     def _collect_preset(self):
         d = dict(self._hdri_values())
@@ -9310,8 +9484,9 @@ class SafeEnvironment(QtWidgets.QWidget):
         self._status("Presets saved: %d. File: %s" % (n, path))
 
     def import_presets(self):
+        start = str(rt.maxFilePath) or os.path.expanduser("~")      # обычно — папка проекта
         path, _f = QtWidgets.QFileDialog.getOpenFileName(
-            self, "Load presets", os.path.expanduser("~"), "SkyRig Studio presets (*.json)")
+            self, "Load presets", start, "SkyRig Studio presets (*.json)")
         if not path:
             return
         try:
@@ -9502,6 +9677,7 @@ class SafeEnvironment(QtWidgets.QWidget):
 
     # ---------- чтение состояния сцены в поля ----------
     def sync_from_scene(self):
+        self._presets_follow_scene()
         self._loading = True
         path = ""
         try:

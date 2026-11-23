@@ -1,5 +1,11 @@
 # История версий
 
+## v0.83 — 2026-11-23
+- Lighting presets belong to the scene: each .max keeps its own list, a new scene starts with an empty list
+- On every change the presets are also copied to “SceneName.presets.json” in the scene folder; a scene without presets picks them up from that file
+- “Save next to scene” is no longer needed and was removed; “From file...” opens in the project folder and also reads presets.json of earlier versions
+- Presets of earlier versions stay in %APPDATA%\SkyRigStudio\presets.json; a one-time message says how to bring them into a scene
+
 ## v0.82 — 2026-11-23
 - Fix: 3ds Max could crash right after choosing a fog for a camera
 - Fix: “No fog” for a camera really removes the fog (an empty SRS_NoFog volume; Corona ignores an empty override slot)

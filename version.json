@@ -1,15 +1,12 @@
 {
-  "version": "0.82",
-  "file": "releases/skyrig_studio_v0.82.py",
-  "sha256": "20205c3a4bfedde4eb27a09607ecf5bd4c7d689adbd265595b71c96fbab07dca",
+  "version": "0.83",
+  "file": "releases/skyrig_studio_v0.83.py",
+  "sha256": "f20d2174a444cca20856cfa8370fb7ca5fd4b9d99a4c87e7e5f8c1ab5f6305f0",
   "date": "2026-11-23",
   "notes": [
-    "Fix: 3ds Max could crash right after choosing a fog for a camera",
-    "Fix: “No fog” for a camera really removes the fog (an empty SRS_NoFog volume; Corona ignores an empty override slot)",
-    "Fog defaults are exactly those of a new CoronaVolumeMtl (Absorption 186 on screen, Distance 0, Scattering black, Directionality 0, Step size 1 cm)",
-    "Map slots next to the Absorption / Scattering / Emission colors: drag a map from the Slate Material Editor, click to pick one, right-click to clear",
-    "Color swatches open the 3ds Max color picker (e.g. Corona Improved Picker) without blocking: Interactive updates while you pick",
-    "“Open in Slate Material Editor”; fogs are kept in the scene even when not assigned",
-    "Simpler fog section: always collapsed when the window opens, Emission settings off, no built-in fog presets, no Allow mixing / Enable caustics, short fog names"
+    "Lighting presets belong to the scene: each .max keeps its own list, a new scene starts with an empty list",
+    "On every change the presets are also copied to “SceneName.presets.json” in the scene folder; a scene without presets picks them up from that file",
+    "“Save next to scene” is no longer needed and was removed; “From file...” opens in the project folder and also reads presets.json of earlier versions",
+    "Presets of earlier versions stay in %APPDATA%\\SkyRigStudio\\presets.json; a one-time message says how to bring them into a scene"
   ]
 }

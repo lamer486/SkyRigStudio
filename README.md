@@ -30,7 +30,8 @@ Without the link the sun stays where you put it; you can click "link to HDRI" ag
 - **Fog** — any number of independent fogs (CoronaVolumeMtl) with all their parameters: one global fog for the scene and/or
   a separate fog (or no fog) for each Corona camera. Works with both HDRI and Corona Sky; maps can be dragged into the color slots from the Slate Material Editor.
 - **Brightness balancing** — brings maps to one lighting level relative to a reference map, so the light doesn't "jump" when you switch HDRIs.
-- **Presets** — the whole lighting setup (map, parameters, sun); the active camera name is suggested when saving.
+- **Presets** — the whole lighting setup (map, parameters, sun, fog); the active camera name is suggested when saving.
+  Presets belong to the scene: each .max keeps its own list, with an automatic copy in “SceneName.presets.json” next to it.
 - **Free map downloads** — ambientCG and Poly Haven (CC0), resolution choice, file integrity checks.
 - **Own history** — "Undo / Redo" for all script actions.
 - **Simple / Expert modes** — essentials only, or every parameter.
@@ -60,7 +61,7 @@ Without the link the sun stays where you put it; you can click "link to HDRI" ag
 - Windows. Internet access is needed for updates and map downloads (the script itself works offline).
 
 ## Installation
-1. Download [`dist/SkyRigStudio_v0.82.mzp`](https://github.com/lamer486/SkyRigStudio/raw/main/dist/SkyRigStudio_v0.82.mzp).
+1. Download [`dist/SkyRigStudio_v0.83.mzp`](https://github.com/lamer486/SkyRigStudio/raw/main/dist/SkyRigStudio_v0.83.mzp).
 2. Drag the file into the 3ds Max window (any viewport). The installer copies the script and creates a macro.
 3. Put the button on a toolbar: **Customize → Customize User Interface → Toolbars** (or Menus / Quads) →
    category **SkyRig Studio** → drag "SkyRig Studio" onto a toolbar. Launch the script with that button.
@@ -152,7 +153,8 @@ HDRI, находит самую яркую точку (солнце на кар�
 - **Туман** — сколько угодно независимых туманов (CoronaVolumeMtl) со всеми параметрами: один глобальный туман на сцену
   и/или свой туман (или без тумана) для каждой Corona-камеры. Работает и с HDRI, и с Corona Sky; карты в слоты цвета перетаскиваются из Slate Material Editor.
 - **Выравнивание яркости** — приводит карты к единому уровню освещённости по эталонной, чтобы при смене HDRI свет не «прыгал».
-- **Пресеты** — освещение целиком (карта, параметры, солнце); при сохранении подставляется имя активной камеры.
+- **Пресеты** — освещение целиком (карта, параметры, солнце, туман); при сохранении подставляется имя активной камеры.
+  Пресеты принадлежат сцене: у каждого .max свой список и автоматическая копия «ИмяСцены.presets.json» рядом с ним.
 - **Загрузка карт из интернета** — ambientCG и Poly Haven (лицензия CC0), выбор разрешения, проверка целостности файлов.
 - **Своя история изменений** — «Undo / Redo» для всех действий скрипта.
 - **Режимы Simple / Expert** — только основное или все параметры.
@@ -181,7 +183,7 @@ HDRI, находит самую яркую точку (солнце на кар�
 - Windows. Для обновлений и загрузки карт — доступ в интернет (сам скрипт работает и без него).
 
 ## Установка
-1. Скачайте [`dist/SkyRigStudio_v0.82.mzp`](https://github.com/lamer486/SkyRigStudio/raw/main/dist/SkyRigStudio_v0.82.mzp).
+1. Скачайте [`dist/SkyRigStudio_v0.83.mzp`](https://github.com/lamer486/SkyRigStudio/raw/main/dist/SkyRigStudio_v0.83.mzp).
 2. Перетащите файл мышью в окно 3ds Max (в любой вьюпорт). Установщик скопирует скрипт и создаст кнопку.
 3. Выведите кнопку на панель: **Customize → Customize User Interface → Toolbars** (или Menus / Quads) →
    категория **SkyRig Studio** → перетащите «SkyRig Studio» на панель. Запуск — по этой кнопке.
