@@ -52,7 +52,7 @@ import pymxs
 from PySide6 import QtWidgets, QtCore, QtGui
 import qtmax
 
-VERSION = "0.80"
+VERSION = "0.81"
 WINDOW_TITLE = "SkyRig Studio v" + VERSION
 COPYRIGHT_TEXT = "Script created with the help of Claude AI by Vasiliy Kanevskiy, 2026."
 CONTACT_EMAIL = "kanevskiy.vasiliy@gmail.com"
@@ -72,7 +72,8 @@ ALL_GROUP = "All files"              # виртуальная группа: об
 FAV_GROUP = "★ Favorites"            # виртуальная группа: избранные карты (v0.73)
 THUMB_W, THUMB_H = 256, 128
 PREVIEW_W, PREVIEW_H = 200, 100        # превью в главном окне (компактное)
-DOCK_WIDTH = 288                       # ширина док-панели (и минимальная: уже — кнопки уходят за край)
+CARDS_COLLAPSED_BY_DEFAULT = ("fog",)   # секции, свёрнутые при первом запуске (дальше окно помнит выбор)
+DOCK_WIDTH = 352                    # ширина док-панели (и минимальная: уже — кнопки уходят за край)
 THUMB_GAMMA = 1.0                     # гамма превью (1.0 = без гамма-кривой)
 THUMB_EV_RANGE = 4.0                  # ползунок экспозиции превью: ±EV
 ICON_NAME = "EnvSunIcon"
@@ -440,6 +441,8 @@ class Library:
         self.ui_simple = bool(d.get("ui_simple", False)) if isinstance(d, dict) else False      # режим «Просто»
         uc = d.get("ui_collapsed", []) if isinstance(d, dict) else []
         self.ui_collapsed = [x for x in uc if isinstance(x, str)] if isinstance(uc, list) else []   # свёрнутые секции
+        ue = d.get("ui_expanded", []) if isinstance(d, dict) else []
+        self.ui_expanded = [x for x in ue if isinstance(x, str)] if isinstance(ue, list) else []    # развёрнутые из свёрнутых по умолчанию
         try:
             self.update_checked = float(d.get("update_checked", 0.0)) if isinstance(d, dict) else 0.0
         except (TypeError, ValueError):
@@ -502,6 +505,7 @@ class Library:
                               "ph_folder": self.ph_folder, "ph_res": self.ph_res, "ph_fmt": self.ph_fmt,
                               "update_auto": self.update_auto, "update_checked": self.update_checked,
                               "ui_simple": self.ui_simple, "ui_collapsed": self.ui_collapsed,
+                              "ui_expanded": self.ui_expanded,
                               "update_latest": self.update_latest, "update_notes": self.update_notes,
                               "backup_auto": self.backup_auto, "backup_dir": self.backup_dir,
                               "backup_keep": self.backup_keep, "backup_last": self.backup_last,
@@ -1759,6 +1763,163 @@ def sky_write(sky, d):
                 print("[SkyRig Studio] Corona Sky: cannot set %s" % a)
 
 
+# ---------------------------------------------------------------------------------------------
+# Туман: материалы CoronaVolumeMtl «SRS_Fog_<имя>». Один туман может стоять глобально (Render Setup ->
+# Scene Environment -> Global volume material) и/или в любых CoronaCam (Global volume override).
+# Все туманы сцены и их параметры хранятся в свойствах файла (FILEPROP_FOGS): туман, который сейчас никуда
+# не назначен, не теряется при сохранении. Если материал тумана стоит в слоте, его параметры главнее.
+# ---------------------------------------------------------------------------------------------
+FOG_PREFIX = "SRS_Fog_"
+FILEPROP_FOGS = "SkyRigStudio_Fogs"
+FOG_NONE, FOG_GLOBAL, FOG_OTHER = "<none>", "<global>", "<other>"
+FOG_DEFAULTS = dict(abs_color=[235, 235, 235], distance=150.0, scat_color=[225, 225, 225], directionality=0.5,
+                    single_bounce=True, emis_color=[255, 255, 255], emis_distance=0.0, abs_map_on=True,
+                    scat_map_on=True, emis_map_on=True, step=0.01, mapping=0, alpha=0, mixing=True, caustics=True)
+# значение -> (свойство CoronaVolumeMtl, вид): c — цвет, m — расстояние в метрах (в сцене — единицы сцены)
+FOG_ATTRS = dict(abs_color=("absorptionColor", "c"), distance=("absorptionDist", "m"),
+                 scat_color=("scatteringColor", "c"), directionality=("scatteringDirectionality", "f"),
+                 single_bounce=("singleBounce", "b"), emis_color=("emissionColor", "c"),
+                 emis_distance=("emissionDist", "m"), abs_map_on=("absorptionColorTexmapOn", "b"),
+                 scat_map_on=("scatteringColorTexmapOn", "b"), emis_map_on=("emissionColorTexmapOn", "b"),
+                 step=("stepSize", "m"), mapping=("mappingMode", "i"), alpha=("alphaMode", "i"),
+                 mixing=("allowMixing", "b"), caustics=("enableCaustics", "b"))
+FOG_PRESETS = (
+    ("Light haze", dict(abs_color=[246, 248, 255], distance=900.0, scat_color=[235, 240, 250], directionality=0.6)),
+    ("Morning mist", dict(abs_color=[235, 235, 235], distance=150.0, scat_color=[225, 225, 225], directionality=0.5)),
+    ("Dense fog", dict(abs_color=[205, 205, 205], distance=35.0, scat_color=[235, 235, 235], directionality=0.3)),
+    ("Smog", dict(abs_color=[205, 185, 155], distance=300.0, scat_color=[195, 180, 155], directionality=0.4)),
+    ("Sunset glow", dict(abs_color=[255, 212, 170], distance=500.0, scat_color=[255, 200, 150], directionality=0.7)),
+)
+
+
+def _rgb(c):
+    return [int(round(float(c.r))), int(round(float(c.g))), int(round(float(c.b)))]
+
+
+def fog_read(m):
+    """Параметры тумана из материала (расстояния — в метрах)."""
+    d = dict(FOG_DEFAULTS)
+    for k, (a, kind) in FOG_ATTRS.items():
+        try:
+            v = getattr(m, a)
+            d[k] = (_rgb(v) if kind == "c" else units_to_m(float(v)) if kind == "m" else
+                    bool(v) if kind == "b" else int(v) if kind == "i" else float(v))
+        except Exception:
+            pass
+    return d
+
+
+def fog_write(m, d):
+    for k, (a, kind) in FOG_ATTRS.items():
+        if k not in d:
+            continue
+        v = d[k]
+        try:
+            if kind == "c":
+                v = rt.color(*[max(0, min(255, int(c))) for c in list(v)[:3]])
+            elif kind == "m":
+                v = m_to_units(max(0.0, float(v)))
+            elif kind == "b":
+                v = bool(v)
+            elif kind == "i":
+                v = int(v)
+            else:
+                v = float(v)
+            setattr(m, a, v)
+        except Exception:
+            print("[SkyRig Studio] fog: cannot set %s" % a)
+
+
+def fog_name_of(m):
+    """Имя нашего тумана (без префикса) или None, если это не наш CoronaVolumeMtl."""
+    try:
+        if m is not None and _class_name(m) == "CoronaVolumeMtl":
+            n = str(m.name)
+            if n.startswith(FOG_PREFIX):
+                return n[len(FOG_PREFIX):]
+    except Exception:
+        pass
+    return None
+
+
+def fog_cameras():
+    """Все CoronaCam сцены (по имени)."""
+    out = []
+    try:
+        for c in rt.cameras:
+            if _class_name(c) == "CoronaCam":
+                out.append(c)
+    except Exception:
+        pass
+    return sorted(out, key=lambda c: str(c.name).lower())
+
+
+def fog_slot_get(obj):
+    """Что стоит в слоте: (значение, материал). obj — рендерер Corona (глобальный слот) или CoronaCam.
+    Значение: имя нашего тумана; FOG_NONE — тумана нет; FOG_GLOBAL — камера без своего тумана (видит
+    глобальный); FOG_OTHER — чужой материал."""
+    if obj is None:
+        return FOG_NONE, None
+    if _class_name(obj) == "CoronaCam":
+        if not bool(obj.overrideGlobalVolumeUse):
+            return FOG_GLOBAL, None
+        m = obj.overrideGlobalVolumeTexmap
+    else:
+        m = obj.globalVolumeMtl
+        if not bool(obj.globalVolumeMtl_use):
+            return FOG_NONE, m
+    if m is None:
+        return FOG_NONE, None
+    n = fog_name_of(m)
+    return (n, m) if n is not None else (FOG_OTHER, m)
+
+
+def fog_slot_set(obj, mtl, value):
+    """value: FOG_NONE / FOG_GLOBAL (только камера) / имя тумана (mtl — его материал)."""
+    cam = _class_name(obj) == "CoronaCam"
+    if cam:
+        if value == FOG_GLOBAL:
+            obj.overrideGlobalVolumeUse = False
+            obj.overrideGlobalVolumeTexmap = None
+        elif value == FOG_NONE:                      # переопределение без материала: в этой камере тумана нет
+            obj.overrideGlobalVolumeTexmap = None
+            obj.overrideGlobalVolumeUse = True
+        else:
+            obj.overrideGlobalVolumeTexmap = mtl
+            obj.overrideGlobalVolumeUse = True
+    else:
+        if value in (FOG_NONE, FOG_GLOBAL):
+            obj.globalVolumeMtl_use = False
+            obj.globalVolumeMtl = None
+        else:
+            obj.globalVolumeMtl = mtl
+            obj.globalVolumeMtl_use = True
+
+
+def fog_slots():
+    """[(ключ, объект)]: «global» — рендерер, «cam:<имя>» — CoronaCam."""
+    out = []
+    r = corona_renderer()
+    if r is not None:
+        out.append(("global", r))
+    for c in fog_cameras():
+        out.append(("cam:" + str(c.name), c))
+    return out
+
+
+def fog_materials():
+    """{имя: материал} — наши туманы, которые сейчас стоят в слотах (один материал на имя)."""
+    out = {}
+    for _k, obj in fog_slots():
+        try:
+            n, m = fog_slot_get(obj)
+        except Exception:
+            continue
+        if m is not None and n not in (FOG_NONE, FOG_GLOBAL, FOG_OTHER) and n not in out:
+            out[n] = m
+    return out
+
+
 def scene_prop_get(key):
     """JSON из пользовательских свойств файла сцены (File > File Properties > Custom) или None."""
     try:
@@ -2307,6 +2468,15 @@ def make_icon(name, color="#e8e8e8", size=64):
             p.drawLine(P(12, 16), P(52, 16))
             p.drawLine(P(26, 16), P(26, 10)); p.drawLine(P(26, 10), P(38, 10)); p.drawLine(P(38, 10), P(38, 16))
             poly([(16, 16), (20, 54), (44, 54), (48, 16)])
+        elif name == "plus":
+            p.drawLine(P(32, 12), P(32, 52)); p.drawLine(P(12, 32), P(52, 32))
+        elif name == "copy":
+            p.setBrush(QtCore.Qt.NoBrush)
+            p.drawRoundedRect(QtCore.QRectF(22 * k, 22 * k, 30 * k, 30 * k), 4 * k, 4 * k)
+            p.drawPolyline(QtGui.QPolygonF([P(14, 40), P(12, 40), P(12, 12), P(40, 12), P(40, 16)]))
+        elif name == "rename":
+            poly([(14, 44), (40, 18), (48, 26), (22, 52), (12, 54)])
+            p.drawLine(P(34, 24), P(42, 32))
         p.end()
         return QtGui.QIcon(pm)
     except Exception:
@@ -2580,6 +2750,35 @@ class MaxSpinBox(QtWidgets.QDoubleSpinBox):
             super().wheelEvent(e)
         else:
             e.ignore()
+
+
+class _ComboWheelGuard(QtCore.QObject):
+    """Колесо мыши над выпадающим списком без фокуса прокручивает окно, а не меняет значение."""
+
+    def eventFilter(self, obj, ev):
+        if ev.type() == QtCore.QEvent.Wheel and isinstance(obj, QtWidgets.QComboBox) and not obj.hasFocus():
+            p = obj.parentWidget()
+            while p is not None and not isinstance(p, QtWidgets.QAbstractScrollArea):
+                p = p.parentWidget()
+            if p is not None:                                  # прокрутить окно, как над пустым местом
+                QtCore.QCoreApplication.sendEvent(p.verticalScrollBar(), ev)
+            return True
+        return False
+
+
+_COMBO_GUARD = None
+
+
+def no_wheel(*combos):
+    global _COMBO_GUARD
+    if _COMBO_GUARD is None:
+        _COMBO_GUARD = _ComboWheelGuard()
+    for c in combos:
+        try:
+            c.setFocusPolicy(QtCore.Qt.StrongFocus)
+            c.installEventFilter(_COMBO_GUARD)
+        except Exception:
+            pass
 
 
 def disable_default_buttons(widget):
@@ -4536,20 +4735,18 @@ class LibraryDialog(QtWidgets.QDialog):
         v.addWidget(self.lbl_mapinfo)
         row = QtWidgets.QHBoxLayout()
         self.b_sun = QtWidgets.QPushButton("☀ Detect sun...")
-        self.b_sun.setToolTip("Finds the sun position on the maps in advance. When such a map is applied, the sun is "
-                              "aligned with it immediately — no need to press “link to HDRI”.")
+        self.b_sun.setToolTip("Finds the sun position on the maps in advance, so that with “Link azimuth to HDRI” on "
+                              "the sun follows a newly applied map without a search.")
         self._sun_menu = QtWidgets.QMenu(self.b_sun)
         self._sun_menu.aboutToShow.connect(self._fill_sun_menu)
         self.b_sun.setMenu(self._sun_menu)
         row.addWidget(self.b_sun)
         row.addStretch(1)
         v.addLayout(row)
-        self.chk_sun_auto = QtWidgets.QCheckBox("Align the sun with the HDRI when a map is applied")
-        self.chk_sun_auto.setToolTip("If the scene has a Corona Sun, it is turned to the sun on the new map right away. "
-                                     "Maps without a distinct sun (overcast, night) leave the sun where it is.")
-        self.chk_sun_auto.setChecked(getattr(self.lib, "sun_auto_align", True))
-        self.chk_sun_auto.toggled.connect(self._on_sun_auto)
-        v.addWidget(self.chk_sun_auto)
+        lbl_sun_rule = QtWidgets.QLabel("The sun follows a new map only when “Link azimuth to HDRI” is on.")
+        lbl_sun_rule.setWordWrap(True)
+        lbl_sun_rule.setStyleSheet("color: #9a9a9a;")
+        v.addWidget(lbl_sun_rule)
         iv.addWidget(sec)
 
         sec, v = self._section("Exposure balance")
@@ -6068,6 +6265,8 @@ class SafeEnvironment(QtWidgets.QWidget):
                     return False
             if bool(sa.get("on", True)) != bool(sb.get("on", True)):
                 return False
+        if a.get("fog") and not _state_equal(a["fog"], b.get("fog") or {}, 1e-3):
+            return False
         return True
 
     def _link_ok(self):
@@ -6773,6 +6972,9 @@ class SafeEnvironment(QtWidgets.QWidget):
         sl.addWidget(self.chk_link)
         root.addWidget(gs)
 
+        # --- туман (CoronaVolumeMtl): общий для HDRI и Corona Sky ---
+        self._build_fog_card(root)
+
         # --- пресеты ---
         gp = self._card("Lighting presets", "presets")
         pl = QtWidgets.QVBoxLayout(gp.body)
@@ -6908,9 +7110,536 @@ class SafeEnvironment(QtWidgets.QWidget):
                            (fs, self.sp_size), (fs, self.sp_dist), (fs, self.sp_icon),
                            (self._fk, self.lbl_sky_target), (self._fk, self.sp_sky_cam),
                            (self._fk, self.sp_sky_refl), (self._fk, self.sp_sky_refr)]
-        self._adv_widgets = [b_pexp, b_pimp, b_pscene, self._card_compass]
+        self._adv_items += [(self._ff, w_) for w_ in self._fog_adv_rows]
+        self._adv_widgets = [b_pexp, b_pimp, b_pscene, self._card_compass, self.b_fog_medit]
+        no_wheel(*self.findChildren(QtWidgets.QComboBox))   # прокрутка окна не меняет значения списков
         self._apply_mode()
         self._apply_env_ui()
+
+    # ---------- туман ----------
+    def _build_fog_card(self, root):
+        g = self._card("Fog (Corona Volume)", "fog")
+        self._card_fog = g
+        v = QtWidgets.QVBoxLayout(g.body)
+        v.setContentsMargins(0, 2, 0, 0)
+        v.setSpacing(4)
+        self._fog_busy = False
+        self._fog_last_cam = None
+
+        row = QtWidgets.QHBoxLayout()
+        row.setSpacing(2)
+        self.cmb_fog = QtWidgets.QComboBox()
+        self.cmb_fog.setToolTip("Fog to edit. Each fog is its own CoronaVolumeMtl “%s<name>”; below you choose "
+                                "where it is used: globally and/or in separate cameras." % FOG_PREFIX)
+        self.cmb_fog.activated.connect(self._on_fog_select)
+        row.addWidget(self.cmb_fog, 1)
+        for icon, tip, fn in (("plus", "New fog", self.fog_new), ("copy", "Duplicate the selected fog", self.fog_duplicate),
+                              ("rename", "Rename the selected fog", self.fog_rename)):
+            b = QtWidgets.QPushButton("")
+            b.setFixedWidth(26)
+            set_btn_icon(b, icon)
+            b.setToolTip(tip)
+            b.clicked.connect(fn)
+            row.addWidget(b)
+        b = QtWidgets.QPushButton("")
+        b.setFixedWidth(26)
+        set_btn_icon(b, "trash")
+        b.setToolTip("Delete the selected fog (it is removed from every slot)")
+        b.clicked.connect(self.fog_delete)
+        row.addWidget(b)
+        v.addLayout(row)
+
+        self.cmb_fog_preset = QtWidgets.QComboBox()
+        self.cmb_fog_preset.addItem("Fog preset…")
+        for name, _d in FOG_PRESETS:
+            self.cmb_fog_preset.addItem(name)
+        self.cmb_fog_preset.setToolTip("Applies ready values to the selected fog (color and density; "
+                                       "the rest stays as it is).")
+        self.cmb_fog_preset.activated.connect(self._on_fog_preset)
+        v.addWidget(self.cmb_fog_preset)
+
+        ff = QtWidgets.QFormLayout()
+        ff.setContentsMargins(0, 0, 0, 0)
+        self._ff = ff
+        self.sp_fog_dist = make_spin(0, 1000000, 10, 1, " m", default=FOG_DEFAULTS["distance"], pixel_divider=2.0)
+        self.sp_fog_dist.setToolTip("Absorption / scattering distance (Corona “Distance”): how far you see "
+                                    "through the fog. Smaller = denser. 0 = no absorption.")
+        self.sw_fog_abs = ColorSwatch(FOG_DEFAULTS["abs_color"], title="Absorption color")
+        self.sw_fog_abs.setToolTip(self.sw_fog_abs.toolTip() + "\nThe color light takes after the Distance: "
+                                   "white = nothing absorbed, darker = denser and darker fog.")
+        self.sw_fog_scat = ColorSwatch(FOG_DEFAULTS["scat_color"], title="Scattering color")
+        self.sw_fog_scat.setToolTip(self.sw_fog_scat.toolTip() + "\nThe color of the fog itself (light scattered "
+                                    "towards the camera). Black = no scattering.")
+        self.sp_fog_dir = make_spin(-0.99, 0.99, 0.05, 2, default=FOG_DEFAULTS["directionality"])
+        self.sp_fog_dir.setToolTip("Scattering directionality: 0 = even; towards 1 = light goes forward "
+                                   "(glow and beams around the sun); negative = backwards.")
+        self.chk_fog_single = ToggleSwitch("Single bounce only")
+        self.chk_fog_single.setToolTip("Only one scattering bounce: much faster and less noisy; "
+                                       "enough for most fogs and haze.")
+        ff.addRow("Distance", self.sp_fog_dist)
+        ff.addRow("Absorption", self.sw_fog_abs)
+        ff.addRow("Scattering", self.sw_fog_scat)
+        ff.addRow("Directionality", self.sp_fog_dir)
+        ff.addRow(self.chk_fog_single)
+        # Expert
+        self.sw_fog_emis = ColorSwatch(FOG_DEFAULTS["emis_color"], title="Emission color")
+        self.sp_fog_edist = make_spin(0, 1000000, 10, 1, " m", default=0.0, pixel_divider=2.0)
+        self.sp_fog_edist.setToolTip("Emission distance: the fog glows by itself. 0 = no emission.")
+        self.sp_fog_step = make_spin(0.001, 1000, 0.01, 3, " m", default=FOG_DEFAULTS["step"])
+        self.sp_fog_step.setToolTip("Step size for maps in the volume. Smaller = more detail, slower. "
+                                    "Does not matter for a fog without maps.")
+        self.cmb_fog_mapping = QtWidgets.QComboBox()
+        self.cmb_fog_mapping.addItems(["On surface", "Inside volume"])
+        self.cmb_fog_mapping.setToolTip("How maps in the color slots are evaluated (Corona “Mode”).")
+        self.cmb_fog_alpha = QtWidgets.QComboBox()
+        self.cmb_fog_alpha.addItems(["Default", "Always black", "Always white"])
+        self.cmb_fog_alpha.setToolTip("How the fog appears in the alpha channel.")
+        self.chk_fog_mix = ToggleSwitch("Allow mixing with other volumes")
+        self.chk_fog_caus = ToggleSwitch("Enable caustics")
+        maps = QtWidgets.QHBoxLayout()
+        maps.setSpacing(6)
+        self.chk_fog_absmap = QtWidgets.QCheckBox("Absorb.")
+        self.chk_fog_scatmap = QtWidgets.QCheckBox("Scatter")
+        self.chk_fog_emismap = QtWidgets.QCheckBox("Emission")
+        for c_ in (self.chk_fog_absmap, self.chk_fog_scatmap, self.chk_fog_emismap):
+            c_.setToolTip("Use the map in this color slot (maps are set in the Material Editor).")
+            maps.addWidget(c_)
+        maps.addStretch(1)
+        self._w_fog_maps = QtWidgets.QWidget()
+        self._w_fog_maps.setLayout(maps)
+        maps.setContentsMargins(0, 0, 0, 0)
+        self.chk_fog_emis_show = ToggleSwitch("Emission settings")
+        self.chk_fog_emis_show.setToolTip("Show the emission parameters (the fog glowing by itself). Hidden by "
+                                          "default; shown automatically when the fog has emission.")
+        self.chk_fog_emis_show.toggled.connect(lambda _on: self._show_emis_rows())
+        ff.addRow(self.chk_fog_emis_show)
+        ff.addRow("Emission", self.sw_fog_emis)
+        ff.addRow("Emission dist.", self.sp_fog_edist)
+        ff.addRow("Step size", self.sp_fog_step)
+        ff.addRow("Map mode", self.cmb_fog_mapping)
+        ff.addRow("Alpha", self.cmb_fog_alpha)
+        ff.addRow("Use maps", self._w_fog_maps)
+        ff.addRow(self.chk_fog_mix)
+        ff.addRow(self.chk_fog_caus)
+        self._fog_adv_rows = [self.chk_fog_emis_show, self.sp_fog_step, self.cmb_fog_mapping,
+                              self.cmb_fog_alpha, self._w_fog_maps, self.chk_fog_mix, self.chk_fog_caus]
+        self._w_fog_params = QtWidgets.QWidget()
+        self._w_fog_params.setLayout(ff)
+        v.addWidget(self._w_fog_params)
+        for sp in (self.sp_fog_dist, self.sp_fog_dir, self.sp_fog_edist, self.sp_fog_step):
+            sp.valueChanged.connect(self._on_fog_setting)
+        for sw in (self.sw_fog_abs, self.sw_fog_scat, self.sw_fog_emis):
+            sw.color_changed.connect(self._on_fog_setting)
+        for t_ in (self.chk_fog_single, self.chk_fog_mix, self.chk_fog_caus, self.chk_fog_absmap,
+                   self.chk_fog_scatmap, self.chk_fog_emismap):
+            t_.toggled.connect(self._on_fog_setting)
+        for c_ in (self.cmb_fog_mapping, self.cmb_fog_alpha):
+            c_.currentIndexChanged.connect(self._on_fog_setting)
+        self.b_fog_medit = QtWidgets.QPushButton("Open in Material Editor")
+        self.b_fog_medit.setToolTip("Puts the selected fog into the Compact Material Editor (last slot): "
+                                    "there you can add maps to the color slots.")
+        self.b_fog_medit.clicked.connect(self.fog_open_medit)
+        v.addWidget(self.b_fog_medit)
+
+        lw = QtWidgets.QLabel("Where the fog is used")
+        lw.setStyleSheet("color: %s; font-weight: bold; padding-top: 4px;" % UI_ACCENT)
+        v.addWidget(lw)
+        self._w_fog_assign = QtWidgets.QWidget()
+        self._fog_assign_form = QtWidgets.QFormLayout(self._w_fog_assign)
+        self._fog_assign_form.setContentsMargins(0, 0, 0, 0)
+        v.addWidget(self._w_fog_assign)
+        self.lbl_fog_hint = QtWidgets.QLabel(
+            "Global: Render Setup → Scene Environment → Global volume material. A camera can have its own fog "
+            "(CoronaCam → Global volume override), no fog, or see the global one. Fog slows rendering: "
+            "keep “Single bounce only” on.")
+        self.lbl_fog_hint.setWordWrap(True)
+        self.lbl_fog_hint.setStyleSheet("color: #9a9a9a; font-size: 8pt;")
+        v.addWidget(self.lbl_fog_hint)
+        root.addWidget(g)
+
+    def _show_emis_rows(self):
+        """Emission тумана: только в Expert и только при включённом «Emission settings»."""
+        try:
+            on = (not bool(self.lib.ui_simple)) and self.chk_fog_emis_show.isChecked()
+            self._ff.setRowVisible(self.sw_fog_emis, on)
+            self._ff.setRowVisible(self.sp_fog_edist, on)
+        except Exception:
+            pass
+
+    # --- данные ---
+    def _fog_reg(self):
+        d = scene_prop_get(FILEPROP_FOGS) or {}
+        fogs = d.get("fogs") if isinstance(d.get("fogs"), dict) else {}
+        return {"fogs": dict(fogs), "sel": d.get("sel", "")}
+
+    def _fog_reg_save(self, reg):
+        scene_prop_set(FILEPROP_FOGS, reg)
+
+    def _fog_all(self):
+        """(реестр, {имя: материал}). Параметры туманов, стоящих в слотах, берутся из материала."""
+        reg = self._fog_reg()
+        mats = fog_materials()
+        for n, m in mats.items():
+            try:
+                reg["fogs"][n] = fog_read(m)
+            except Exception:
+                pass
+        return reg, mats
+
+    def _fog_cur(self):
+        n = self.cmb_fog.currentData() if self.cmb_fog.count() else None
+        return n or None
+
+    def _fog_values(self):
+        return dict(abs_color=self.sw_fog_abs.rgb(), distance=self.sp_fog_dist.value(),
+                    scat_color=self.sw_fog_scat.rgb(), directionality=self.sp_fog_dir.value(),
+                    single_bounce=self.chk_fog_single.isChecked(), emis_color=self.sw_fog_emis.rgb(),
+                    emis_distance=self.sp_fog_edist.value(), abs_map_on=self.chk_fog_absmap.isChecked(),
+                    scat_map_on=self.chk_fog_scatmap.isChecked(), emis_map_on=self.chk_fog_emismap.isChecked(),
+                    step=self.sp_fog_step.value(), mapping=self.cmb_fog_mapping.currentIndex(),
+                    alpha=self.cmb_fog_alpha.currentIndex(), mixing=self.chk_fog_mix.isChecked(),
+                    caustics=self.chk_fog_caus.isChecked())
+
+    def _fog_show_values(self, d):
+        d = dict(FOG_DEFAULTS, **(d or {}))
+        self._fog_busy = True
+        try:
+            self.sp_fog_dist.setValue(float(d["distance"]))
+            self.sw_fog_abs.set_rgb(d["abs_color"])
+            self.sw_fog_scat.set_rgb(d["scat_color"])
+            self.sp_fog_dir.setValue(float(d["directionality"]))
+            self.chk_fog_single.setChecked(bool(d["single_bounce"]))
+            self.sw_fog_emis.set_rgb(d["emis_color"])
+            self.sp_fog_edist.setValue(float(d["emis_distance"]))
+            if float(d["emis_distance"]) > 0 and not self.chk_fog_emis_show.isChecked():
+                self.chk_fog_emis_show.setChecked(True)      # у тумана есть свечение — показать его параметры
+            self.sp_fog_step.setValue(max(0.001, float(d["step"])))
+            self.cmb_fog_mapping.setCurrentIndex(max(0, min(1, int(d["mapping"]))))
+            self.cmb_fog_alpha.setCurrentIndex(max(0, min(2, int(d["alpha"]))))
+            self.chk_fog_mix.setChecked(bool(d["mixing"]))
+            self.chk_fog_caus.setChecked(bool(d["caustics"]))
+            self.chk_fog_absmap.setChecked(bool(d["abs_map_on"]))
+            self.chk_fog_scatmap.setChecked(bool(d["scat_map_on"]))
+            self.chk_fog_emismap.setChecked(bool(d["emis_map_on"]))
+        finally:
+            self._fog_busy = False
+
+    def _fog_material(self, name, reg, mats):
+        """Материал тумана: тот, что уже стоит в слотах (общий для всех слотов), иначе новый из реестра."""
+        m = mats.get(name)
+        if m is None:
+            m = rt.CoronaVolumeMtl()
+            m.name = FOG_PREFIX + name
+            fog_write(m, dict(FOG_DEFAULTS, **reg["fogs"].get(name, {})))
+            mats[name] = m
+        return m
+
+    # --- синхронизация с окном ---
+    def _fog_sync(self, select=None):
+        """Список туманов, параметры выбранного и строки назначения — из сцены."""
+        if not hasattr(self, "cmb_fog"):
+            return
+        self._fog_busy = True
+        try:
+            reg, mats = self._fog_all()
+            names = sorted(reg["fogs"], key=lambda s: s.lower())
+            cur = select or self._fog_cur() or reg.get("sel") or ""
+            # вид переключили на другую камеру со своим туманом — сразу редактируем его
+            cam = active_corona_cam()
+            cam_name = str(cam.name) if cam is not None else None
+            if select is None and cam_name != self._fog_last_cam and cam is not None:
+                n, _m = fog_slot_get(cam)
+                if n in reg["fogs"]:
+                    cur = n
+            self._fog_last_cam = cam_name
+            if cur not in reg["fogs"]:
+                cur = names[0] if names else ""
+            self.cmb_fog.clear()
+            if not names:
+                self.cmb_fog.addItem("No fog yet: press +", None)
+            for n in names:
+                users = self._fog_users(n)
+                self.cmb_fog.addItem(n + (("  ·  " + ", ".join(users)) if users else "  ·  not used"), n)
+            if cur:
+                self.cmb_fog.setCurrentIndex(max(0, self.cmb_fog.findData(cur)))
+            self._w_fog_params.setEnabled(bool(cur))
+            self.cmb_fog_preset.setEnabled(bool(cur))
+            self.b_fog_medit.setEnabled(bool(cur))
+            self._fog_show_values(reg["fogs"].get(cur) if cur else None)
+            self._fog_build_assign(names)
+        except Exception:
+            print("[SkyRig Studio] fog sync:\n" + traceback.format_exc())
+        finally:
+            self._fog_busy = False
+
+    def _fog_users(self, name):
+        out = []
+        for key, obj in fog_slots():
+            try:
+                if fog_slot_get(obj)[0] == name:
+                    out.append("Global" if key == "global" else key[4:])
+            except Exception:
+                pass
+        return out
+
+    def _fog_build_assign(self, names):
+        f = self._fog_assign_form
+        while f.rowCount():
+            f.removeRow(0)
+        slots = fog_slots()
+        if not slots:
+            f.addRow(QtWidgets.QLabel("Current renderer is not Corona."))
+            return
+        act = active_corona_cam()
+        act_name = str(act.name) if act is not None else None
+        for key, obj in slots:
+            try:
+                val, m = fog_slot_get(obj)
+            except Exception:
+                continue
+            cmb = QtWidgets.QComboBox()
+            if key == "global":
+                label = "Global"
+                cmb.addItem("No fog", FOG_NONE)
+                cmb.setToolTip("Global volume material in Render Setup → Scene Environment: fog for the whole "
+                               "scene and for every camera without its own fog.")
+            else:
+                cname = key[4:]
+                label = ("▶ " if cname == act_name else "") + cname
+                cmb.addItem("Global fog", FOG_GLOBAL)
+                cmb.addItem("No fog", FOG_NONE)
+                cmb.setToolTip("Fog of camera “%s” (Global volume override). “Global fog” — the camera sees the "
+                               "global fog; “No fog” — no fog in this camera." % cname)
+            for n in names:
+                cmb.addItem(n, n)
+            if val == FOG_OTHER:
+                cmb.insertItem(0, "(your material: %s)" % (str(m.name) if m is not None else "?"), FOG_OTHER)
+            cmb.setCurrentIndex(max(0, cmb.findData(val)))
+            no_wheel(cmb)
+            cmb.activated.connect(lambda _i, k=key, c=cmb: self._fog_assign(k, c.currentData()))
+            lbl = QtWidgets.QLabel(label)
+            lbl.setToolTip("Corona camera; ▶ — the camera of the active view" if key != "global" else
+                           "Render Setup → Scene Environment → Global volume material")
+            f.addRow(lbl, cmb)
+
+    # --- действия ---
+    def _on_fog_select(self, *_):
+        n = self._fog_cur()
+        if not n:
+            return
+        reg = self._fog_reg()
+        reg["sel"] = n
+        self._fog_reg_save(reg)
+        self._fog_sync(select=n)
+
+    def _on_fog_setting(self, *_):
+        if self._fog_busy or getattr(self, "_loading", False):
+            return
+        n = self._fog_cur()
+        if not n:
+            return
+        d = self._fog_values()
+        reg, mats = self._fog_all()
+        reg["fogs"][n] = d
+        self._fog_reg_save(reg)
+        m = mats.get(n)
+        if m is not None:
+            self._run("fog settings", lambda: (fog_write(m, d), True)[1])
+        self._refresh_state()
+
+    def _ask_fog_name(self, title, text, default):
+        name, ok = QtWidgets.QInputDialog.getText(self, title, text, QtWidgets.QLineEdit.Normal, default)
+        name = (name or "").strip().replace(FOG_PREFIX, "")
+        if not ok or not name:
+            return None
+        return name
+
+    def _free_fog_name(self, base, reg):
+        name, i = base, 2
+        while name in reg["fogs"]:
+            name = "%s %d" % (base, i)
+            i += 1
+        return name
+
+    def fog_new(self):
+        reg, _m = self._fog_all()
+        cam = active_corona_cam()
+        base = ("Fog " + str(cam.name)) if cam is not None else "Fog"
+        name = self._ask_fog_name("New fog", "Fog name:", self._free_fog_name(base, reg))
+        if not name:
+            return
+        if name in reg["fogs"]:
+            self._status("A fog named “%s” already exists." % name, error=True)
+            return
+        reg["fogs"][name] = dict(FOG_DEFAULTS)
+        reg["sel"] = name
+        self._fog_reg_save(reg)
+        self._fog_sync(select=name)
+        self._status("Fog “%s” created (Morning mist values). Choose below where it is used: Global and/or "
+                     "a camera." % name)
+
+    def fog_duplicate(self):
+        n = self._fog_cur()
+        if not n:
+            return
+        reg, _m = self._fog_all()
+        name = self._ask_fog_name("Duplicate fog", "Name of the copy:", self._free_fog_name(n + " copy", reg))
+        if not name:
+            return
+        if name in reg["fogs"]:
+            self._status("A fog named “%s” already exists." % name, error=True)
+            return
+        reg["fogs"][name] = dict(reg["fogs"].get(n, FOG_DEFAULTS))
+        reg["sel"] = name
+        self._fog_reg_save(reg)
+        self._fog_sync(select=name)
+        self._status("Fog “%s” is a copy of “%s” and is not used yet: assign it below." % (name, n))
+
+    def fog_rename(self):
+        n = self._fog_cur()
+        if not n:
+            return
+        reg, mats = self._fog_all()
+        name = self._ask_fog_name("Rename fog", "New name:", n)
+        if not name or name == n:
+            return
+        if name in reg["fogs"]:
+            self._status("A fog named “%s” already exists." % name, error=True)
+            return
+        reg["fogs"][name] = reg["fogs"].pop(n)
+        reg["sel"] = name
+        m = mats.get(n)
+        if m is not None:
+            self._run("rename fog", lambda: (setattr(m, "name", FOG_PREFIX + name), True)[1])
+        self._fog_reg_save(reg)
+        self._fog_sync(select=name)
+
+    def fog_delete(self):
+        n = self._fog_cur()
+        if not n:
+            return
+        users = self._fog_users(n)
+        msg = "Delete fog “%s”?" % n
+        if users:
+            msg += "\n\nIt is used in: %s. These slots become: Global → no fog, cameras → global fog." % ", ".join(users)
+        if QtWidgets.QMessageBox.question(self, WINDOW_TITLE, msg) != QtWidgets.QMessageBox.Yes:
+            return
+        reg, _m = self._fog_all()
+
+        def do():
+            for key, obj in fog_slots():
+                if fog_slot_get(obj)[0] == n:
+                    fog_slot_set(obj, None, FOG_NONE if key == "global" else FOG_GLOBAL)
+            return True
+
+        self._run("delete fog", do)
+        reg["fogs"].pop(n, None)
+        reg["sel"] = ""
+        self._fog_reg_save(reg)
+        self._fog_sync()
+        self._status("Fog “%s” deleted." % n)
+
+    def _on_fog_preset(self, idx):
+        self.cmb_fog_preset.setCurrentIndex(0)
+        if idx <= 0:
+            return
+        name, vals = FOG_PRESETS[idx - 1]
+        n = self._fog_cur()
+        if not n:
+            self._status("Create a fog first (+).", error=True)
+            return
+        d = self._fog_values()
+        d.update(vals)
+        self._fog_show_values(d)
+        self._on_fog_setting()
+        self._fog_sync(select=n)
+        self._status("Fog “%s”: preset “%s” applied." % (n, name))
+
+    def _fog_assign(self, key, value):
+        obj = dict(fog_slots()).get(key)
+        if obj is None or value == FOG_OTHER:
+            return
+        cur, m_old = fog_slot_get(obj)
+        if cur == value:
+            return
+        where = "Global volume material" if key == "global" else "camera “%s”" % key[4:]
+        if cur == FOG_OTHER:
+            r = QtWidgets.QMessageBox.question(
+                self, WINDOW_TITLE, "%s holds your own material “%s”.\nReplace it?\n\nYou can undo with Ctrl+Z."
+                % (where, str(m_old.name) if m_old is not None else "?"))
+            if r != QtWidgets.QMessageBox.Yes:
+                self._fog_sync()
+                return
+        reg, mats = self._fog_all()
+        mtl = self._fog_material(value, reg, mats) if value not in (FOG_NONE, FOG_GLOBAL) else None
+        self._run("assign fog", lambda: (fog_slot_set(obj, mtl, value), True)[1])
+        if value not in (FOG_NONE, FOG_GLOBAL):
+            reg["sel"] = value
+            self._fog_reg_save(reg)
+        self._fog_sync(select=value if value not in (FOG_NONE, FOG_GLOBAL) else None)
+        what = {FOG_NONE: "no fog", FOG_GLOBAL: "global fog"}.get(value, "fog “%s”" % value)
+        self._status("%s: %s." % (where[0].upper() + where[1:], what))
+
+    def fog_open_medit(self):
+        n = self._fog_cur()
+        if not n:
+            return
+        reg, mats = self._fog_all()
+        m = self._fog_material(n, reg, mats)
+        try:
+            rt.MatEditor.mode = rt.Name("basic")
+            rt.meditMaterials[23] = m
+            rt.MatEditor.Open()
+            rt.activeMeditSlot = 24
+            self._status("Fog “%s” is in the last slot of the Compact Material Editor%s." % (
+                n, "" if self._fog_users(n) else " (it is not used in the scene yet)"))
+        except Exception:
+            print("[SkyRig Studio] fog medit:\n" + traceback.format_exc())
+
+    def _fog_snapshot(self):
+        """Все туманы и назначения — для пресетов освещения."""
+        reg, _m = self._fog_all()
+        slots = {}
+        for key, obj in fog_slots():
+            try:
+                val = fog_slot_get(obj)[0]
+            except Exception:
+                continue
+            if val != FOG_OTHER:
+                slots[key] = val
+        return {"fogs": reg["fogs"], "slots": slots}
+
+    def _fog_restore(self, snap):
+        """Пресет освещения: туманы (параметры) и назначения. Камеры, которых нет в сцене, пропускаются;
+        чужие материалы в слотах не трогаются."""
+        reg, mats = self._fog_all()
+        fogs = snap.get("fogs") or {}
+        for n, d in fogs.items():
+            reg["fogs"][n] = dict(FOG_DEFAULTS, **d)
+        slots = dict(fog_slots())
+        skipped = []
+
+        def do():
+            for n, d in fogs.items():
+                if n in mats:
+                    fog_write(mats[n], dict(FOG_DEFAULTS, **d))
+            for key, val in (snap.get("slots") or {}).items():
+                obj = slots.get(key)
+                if obj is None:
+                    continue
+                if fog_slot_get(obj)[0] == FOG_OTHER:
+                    skipped.append("Global" if key == "global" else key[4:])
+                    continue
+                mtl = self._fog_material(val, reg, mats) if val not in (FOG_NONE, FOG_GLOBAL) else None
+                if mtl is None and val not in (FOG_NONE, FOG_GLOBAL):
+                    continue
+                fog_slot_set(obj, mtl, val)
+            return True
+
+        self._run("preset fog", do)
+        self._fog_reg_save(reg)
+        self._fog_sync()
+        return skipped
 
     # ---------- источник неба: HDRI / Corona Sky ----------
     def _show_cloud_rows(self, on=None):
@@ -7108,16 +7837,26 @@ class SafeEnvironment(QtWidgets.QWidget):
         self.sp_cl_seed.setValue(float(random.randint(1, 99999)))
 
     def _card(self, title, key):
-        card = CollapsibleCard(title, key, collapsed=(key in self.lib.ui_collapsed))
+        if key in CARDS_COLLAPSED_BY_DEFAULT:      # свёрнута, пока пользователь сам её не развернёт
+            collapsed = key not in self.lib.ui_expanded
+        else:
+            collapsed = key in self.lib.ui_collapsed
+        card = CollapsibleCard(title, key, collapsed=collapsed)
         card.state_changed.connect(self._on_card_toggled)
         return card
 
     def _on_card_toggled(self, key, collapsed):
         try:
-            cur = [k for k in self.lib.ui_collapsed if k != key]
-            if collapsed:
-                cur.append(key)
-            self.lib.ui_collapsed = cur
+            if key in CARDS_COLLAPSED_BY_DEFAULT:
+                cur = [k for k in self.lib.ui_expanded if k != key]
+                if not collapsed:
+                    cur.append(key)
+                self.lib.ui_expanded = cur
+            else:
+                cur = [k for k in self.lib.ui_collapsed if k != key]
+                if collapsed:
+                    cur.append(key)
+                self.lib.ui_collapsed = cur
             self._save_lib()
         except Exception:
             pass
@@ -7139,6 +7878,25 @@ class SafeEnvironment(QtWidgets.QWidget):
                 w.setVisible(not simple)
         except Exception:
             print("[SkyRig Studio] apply_mode error:\n" + traceback.format_exc())
+        self._show_emis_rows()
+        QtCore.QTimer.singleShot(0, self._fit_dock)     # Expert шире Simple: панель расширяется сама
+
+    def _fit_dock(self):
+        """Док-панель не уже содержимого окна (+ вертикальная прокрутка): элементы не уходят за край."""
+        try:
+            sc = self.parentWidget().parentWidget() if self.parentWidget() is not None else None
+            dock = sc.parentWidget() if sc is not None else None
+            if not isinstance(sc, QtWidgets.QScrollArea) or not isinstance(dock, QtWidgets.QDockWidget):
+                return
+            need = self.minimumSizeHint().width() + sc.verticalScrollBar().sizeHint().width() + 10
+            if dock.minimumWidth() < need:
+                dock.setMinimumWidth(need)
+            if dock.width() < need and not dock.isFloating():
+                mw = dock.parentWidget()
+                if isinstance(mw, QtWidgets.QMainWindow):
+                    mw.resizeDocks([dock], [need], QtCore.Qt.Horizontal)
+        except Exception:
+            pass
 
     @undoable("HDRI change")
     def step_hdri(self, direction):
@@ -7463,25 +8221,11 @@ class SafeEnvironment(QtWidgets.QWidget):
         self.sync_from_scene()
         sun_note = ""
         self._sun_skip_note = ""
-        if find_sun() is not None:
-            if self.chk_link.isChecked():
-                self._align_impl(create_if_missing=False, quiet=True)
-                sun_note = self._sun_skip_note
-            elif getattr(self.lib, "sun_auto_align", True):
-                # солнце сразу по новой карте: положение берётся из кэша («Detect sun…» в библиотеке) или ищется
-                # один раз; карты без явного солнца (пасмурно, ночь) солнце не двигают
-                try:
-                    pt = self._hdri_sun_point(path)
-                except Exception:
-                    print("[SkyRig Studio] find brightest error:\n" + traceback.format_exc())
-                    pt = None
-                if pt is not None and pt[2] >= SUN_MIN_PEAK:
-                    if self._align_impl(create_if_missing=False, quiet=True):
-                        sun_note = " Sun aligned with the HDRI."
-                        self.chk_link.setChecked(True)   # дальше солнце следует за поворотом карты
-                        set_sun_link(find_sun(), True)
-                elif pt is not None:
-                    sun_note = " No distinct sun on this map: the sun was not moved."
+        # Солнце ищется на новой карте ТОЛЬКО при включённой привязке «Link azimuth to HDRI». Без неё смена карты
+        # (в т. ч. Prev / Next) солнце не трогает и поиск не запускает — на тяжёлых сценах это быстрое перелистывание.
+        if find_sun() is not None and self.chk_link.isChecked():
+            self._align_impl(create_if_missing=False, quiet=True)
+            sun_note = self._sun_skip_note
         note = ""
         corr = self._corr_ev(path)
         if auto_exposure and (not prev_path or path_key(prev_path) != path_key(path)):
@@ -8060,6 +8804,10 @@ class SafeEnvironment(QtWidgets.QWidget):
             on=self.chk_on.isChecked(), height=self.sp_elev.value(), azimuth=self.sp_azim.value(),
             intensity=self.sp_int.value(), size=self.sp_size.value(), distance=self.sp_dist.value(),
             icon=self.sp_icon.value(), link=self.chk_link.isChecked())
+        try:
+            d["fog"] = self._fog_snapshot()
+        except Exception:
+            print("[SkyRig Studio] fog snapshot:\n" + traceback.format_exc())
         return d
 
     def _store_preset(self, name):
@@ -8345,6 +9093,10 @@ class SafeEnvironment(QtWidgets.QWidget):
 
             self._run("preset sun", do)
             self.chk_link.setChecked(bool(sun.get("link", False)))
+        if p.get("fog"):                              # пресеты до v0.81 без тумана туман сцены не трогают
+            skipped = self._fog_restore(p["fog"])
+            if skipped:
+                notes.append("fog not changed where your own volume material is (%s)" % ", ".join(skipped))
         self.sync_from_scene()
         if self.chk_link.isChecked() and find_sun() is not None:
             self._align_impl(create_if_missing=False, quiet=True, azimuth_only=True)
@@ -8460,6 +9212,7 @@ class SafeEnvironment(QtWidgets.QWidget):
                 self.sp_cl_cirrus.setValue(d["clouds_cirrus"])
                 self.sp_cl_seed.setValue(float(d["clouds_seed"]))
             self._apply_env_ui()
+            self._fog_sync()
 
             s = find_sun()
             if s is None:
@@ -8578,10 +9331,17 @@ def show():
                          | QtWidgets.QDockWidget.DockWidgetFloatable
                          | QtWidgets.QDockWidget.DockWidgetClosable)
         dock.setWidget(scroll)
-        dock.setMinimumWidth(DOCK_WIDTH)
+        # ширина — по содержимому окна (+ вертикальная прокрутка и запас), чтобы ничего не уходило за край
+        width = DOCK_WIDTH
+        try:
+            need = win.minimumSizeHint().width() + scroll.verticalScrollBar().sizeHint().width() + 10
+            width = max(DOCK_WIDTH, need)
+        except Exception:
+            pass
+        dock.setMinimumWidth(width)
         main_win.addDockWidget(QtCore.Qt.LeftDockWidgetArea, dock)
         try:
-            main_win.resizeDocks([dock], [DOCK_WIDTH], QtCore.Qt.Horizontal)
+            main_win.resizeDocks([dock], [width], QtCore.Qt.Horizontal)
         except Exception:
             pass   # слева — на всю высоту; справа окно встаёт под Command Panel
         dock.show()

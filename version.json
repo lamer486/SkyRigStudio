@@ -1,9 +1,12 @@
 {
-  "version": "0.80",
-  "file": "releases/skyrig_studio_v0.80.py",
-  "sha256": "1c3061750e16bc49e0487c11803f208a8a7ff3c480b492de512d806223d7afba",
-  "date": "2026-11-19",
+  "version": "0.81",
+  "file": "releases/skyrig_studio_v0.81.py",
+  "sha256": "a998a2257840bd8ddc91d79e6b187fa70034fabe72affec4a9a11799cac4697c",
+  "date": "2026-11-23",
   "notes": [
-    "Corona Sky: Altitude (observer height in meters) and Ground color; both are saved in presets and restored when you switch HDRI ↔ Corona Sky"
+    "Fog section: any number of independent fogs (CoronaVolumeMtl) with all their parameters; one global fog (Global volume material) and/or a separate fog or no fog for each Corona camera (Global volume override); fog presets; lighting presets save fogs and camera assignments. Collapsed by default",
+    "Switching maps (Prev / Next, library) searches the sun only when “Link azimuth to HDRI” is on: fast browsing on heavy scenes",
+    "The window opens wider so nothing is cut off, and widens itself in Expert mode",
+    "Mouse wheel over drop-down lists scrolls the window instead of changing the value"
   ]
 }

@@ -1,5 +1,11 @@
 # История версий
 
+## v0.81 — 2026-11-23
+- Fog section: any number of independent fogs (CoronaVolumeMtl) with all their parameters; one global fog (Global volume material) and/or a separate fog or no fog for each Corona camera (Global volume override); fog presets; lighting presets save fogs and camera assignments. Collapsed by default
+- Switching maps (Prev / Next, library) searches the sun only when “Link azimuth to HDRI” is on: fast browsing on heavy scenes
+- The window opens wider so nothing is cut off, and widens itself in Expert mode
+- Mouse wheel over drop-down lists scrolls the window instead of changing the value
+
 ## v0.80 — 2026-11-19
 - Corona Sky: Altitude (observer height in meters) and Ground color; both are saved in presets and restored when you switch HDRI ↔ Corona Sky
 
