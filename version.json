@@ -1,12 +1,10 @@
 {
-  "version": "0.83",
-  "file": "releases/skyrig_studio_v0.83.py",
-  "sha256": "f20d2174a444cca20856cfa8370fb7ca5fd4b9d99a4c87e7e5f8c1ab5f6305f0",
-  "date": "2026-11-23",
+  "version": "0.84",
+  "file": "releases/skyrig_studio_v0.84.py",
+  "sha256": "6c70ca63f043410779ee64e3f4609380106c2333a034984d6be364d3ed003fcc",
+  "date": "2026-11-24",
   "notes": [
-    "Lighting presets belong to the scene: each .max keeps its own list, a new scene starts with an empty list",
-    "On every change the presets are also copied to “SceneName.presets.json” in the scene folder; a scene without presets picks them up from that file",
-    "“Save next to scene” is no longer needed and was removed; “From file...” opens in the project folder and also reads presets.json of earlier versions",
-    "Presets of earlier versions stay in %APPDATA%\\SkyRigStudio\\presets.json; a one-time message says how to bring them into a scene"
+    "HDRI White balance (Kelvin, 6500 K = unchanged) and Tint (green-magenta) in HDRI settings, next to Saturation (Expert mode): only the map changes color, Corona Sun keeps its own; saved in presets and kept on Prev / Next",
+    "Window icon: the logo keeps its proportions (it was squeezed in the HDRI Library title bar)"
   ]
 }

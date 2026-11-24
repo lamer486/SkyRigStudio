@@ -1,5 +1,9 @@
 # История версий
 
+## v0.84 — 2026-11-24
+- HDRI White balance (Kelvin, 6500 K = unchanged) and Tint (green-magenta) in HDRI settings, next to Saturation (Expert mode): only the map changes color, Corona Sun keeps its own; saved in presets and kept on Prev / Next
+- Window icon: the logo keeps its proportions (it was squeezed in the HDRI Library title bar)
+
 ## v0.83 — 2026-11-23
 - Lighting presets belong to the scene: each .max keeps its own list, a new scene starts with an empty list
 - On every change the presets are also copied to “SceneName.presets.json” in the scene folder; a scene without presets picks them up from that file

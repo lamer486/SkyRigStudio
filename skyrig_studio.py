@@ -52,7 +52,7 @@ import pymxs
 from PySide6 import QtWidgets, QtCore, QtGui
 import qtmax
 
-VERSION = "0.83"
+VERSION = "0.84"
 WINDOW_TITLE = "SkyRig Studio v" + VERSION
 COPYRIGHT_TEXT = "Script created with the help of Claude AI by Vasiliy Kanevskiy, 2026."
 CONTACT_EMAIL = "kanevskiy.vasiliy@gmail.com"
@@ -1786,6 +1786,25 @@ def cc_write(cc, ev, gamma, sat_pct):
         cc.saturation = float(sat_pct) - 100.0
 
 
+WB_NEUTRAL = 6500.0                     # Temperature коррекции, при которой цвет не меняется
+
+
+def cc_read_wb(cc):
+    """(Кельвины, green-magenta tint) коррекции; у коррекции 3ds Max (старые сцены) — нейтрально."""
+    if cc is not None and _class_name(cc) == "CoronaColorCorrect":
+        try:
+            return float(cc.temperature), float(cc.greenMagentaTint)
+        except Exception:
+            pass
+    return WB_NEUTRAL, 0.0
+
+
+def cc_write_wb(cc, kelvin, tint):
+    if cc is not None and _class_name(cc) == "CoronaColorCorrect":
+        cc.temperature = max(1000.0, min(40000.0, float(kelvin)))
+        cc.greenMagentaTint = max(-1.0, min(1.0, float(tint)))
+
+
 def _our_chain(m):
     """(коррекция, CoronaBitmap), если карта m создана скриптом (имена EnvCC / EnvHDRI);
     пользовательские карты коррекции -> CoronaBitmap считаются чужими."""
@@ -2609,6 +2628,21 @@ def logo_pixmap(height, dpr=1.0):
     p.drawEllipse(QtCore.QPointF(178, 83), 18, 18)                    # солнце
     p.end()
     return pm
+
+
+def logo_icon():
+    """Значок окна: знак вписан в квадрат с сохранением пропорций (иначе Windows сжимает его по ширине)."""
+    ic = QtGui.QIcon()
+    for size in (16, 24, 32, 48, 64):
+        sq = QtGui.QPixmap(size, size)
+        sq.fill(QtCore.Qt.transparent)
+        mark = logo_pixmap(size * 89.0 / 184.0 * 0.96, 1.0)            # ширина знака ≈ ширина квадрата
+        p = QtGui.QPainter(sq)
+        p.setRenderHint(QtGui.QPainter.SmoothPixmapTransform)
+        p.drawPixmap(int(round((size - mark.width()) / 2.0)), int(round((size - mark.height()) / 2.0)), mark)
+        p.end()
+        ic.addPixmap(sq)
+    return ic
 UI_BTN_BG = "#4a4a4a"
 UI_BTN_HOVER = "#585858"
 UI_BTN_PRESSED = "#3a3a3a"
@@ -6679,9 +6713,11 @@ class SafeEnvironment(QtWidgets.QWidget):
                 return False
         if not self._close(a.get("blur", BLUR_DEFAULT), b.get("blur", BLUR_DEFAULT)):   # старые пресеты: Blur = 1
             return False
-        for k in ("horizon", "cam_ev", "refl_ev", "refr_ev"):                          # старые пресеты: 0
+        for k in ("horizon", "cam_ev", "refl_ev", "refr_ev", "wb_tint"):               # старые пресеты: 0
             if not self._close(a.get(k, 0.0), b.get(k, 0.0)):
                 return False
+        if not self._close(a.get("wb_temp", WB_NEUTRAL), b.get("wb_temp", WB_NEUTRAL), 0.5):
+            return False
         pa, pb = a.get("hdri", ""), b.get("hdri", "")
         if (path_key(pa) if pa else "") != (path_key(pb) if pb else ""):
             return False
@@ -7064,7 +7100,7 @@ class SafeEnvironment(QtWidgets.QWidget):
         hl.addStretch(1)
         root.addWidget(hdr)
         try:
-            self.setWindowIcon(QtGui.QIcon(logo_pixmap(32, 2.0)))
+            self.setWindowIcon(logo_icon())
         except Exception:
             pass
 
@@ -7187,6 +7223,13 @@ class SafeEnvironment(QtWidgets.QWidget):
         self.sp_exp = make_spin(-10, 10, 0.1, 2, " EV", default=0.0)
         self.sp_gamma = make_spin(0.1, 5, 0.05, 2, default=1.0)
         self.sp_sat = make_spin(0, 200, 5, 1, " %", default=100.0)   # 100 % = без изменений
+        # баланс белого карты (Temperature / Green-magenta tint коррекции EnvCC); 6500 K и 0 = без изменений
+        self.sp_wb = make_spin(1000, 40000, 100, 0, " K", default=WB_NEUTRAL, pixel_divider=1.0)
+        self.sp_wb.setToolTip("White balance of the HDRI, like White balance of a camera but only for the map: "
+                              "lower = cooler (bluer), higher = warmer. 6500 K = unchanged.\n"
+                              "Affects the light from the HDRI and the background; Corona Sun keeps its color.")
+        self.sp_wbtint = make_spin(-1, 1, 0.01, 2, default=0.0)
+        self.sp_wbtint.setToolTip("Green-magenta tint of the HDRI: negative = magenta, positive = green. 0 = unchanged.")
         self.sp_blur = make_spin(BLUR_MIN, BLUR_MAX, 0.1, 2, default=BLUR_DEFAULT, pixel_divider=0.1)   # Blur у CoronaBitmap
         self.sp_horizon = make_spin(HORIZON_MIN, HORIZON_MAX, 0.1, 2, "°", default=0.0, pixel_divider=0.1)
         self.sp_horizon.setToolTip("Vertical shift of the HDRI horizon (Offset V of CoronaBitmap).")
@@ -7198,7 +7241,7 @@ class SafeEnvironment(QtWidgets.QWidget):
         self.sp_refr.setToolTip("Brightness of the HDRI in refractions, relative to the main exposure. 0 = no separate adjustment.")
         self.sp_rot.valueChanged.connect(self._on_rot_spin)
         self.sl_rot.valueChanged.connect(self._on_rot_slider)
-        for s in (self.sp_exp, self.sp_gamma, self.sp_sat, self.sp_blur, self.sp_horizon,
+        for s in (self.sp_exp, self.sp_gamma, self.sp_sat, self.sp_wb, self.sp_wbtint, self.sp_blur, self.sp_horizon,
                   self.sp_cam, self.sp_refl, self.sp_refr):
             s.valueChanged.connect(self._on_hdri_setting)
         f.addRow("Rotation", self.sp_rot)
@@ -7216,6 +7259,8 @@ class SafeEnvironment(QtWidgets.QWidget):
         f.addRow("Exposure", self.sp_exp)
         f.addRow("Gamma", self.sp_gamma)
         f.addRow("Saturation", self.sp_sat)
+        f.addRow("White balance", self.sp_wb)
+        f.addRow("Tint", self.sp_wbtint)
         # Blur и Horizon — одна сетка: поле одинаковой ширины слева, кнопка «min» и переключатель линии
         # в одной колонке справа
         SHORT_SPIN_W, ROW_GAP = 88, 8
@@ -7534,7 +7579,8 @@ class SafeEnvironment(QtWidgets.QWidget):
         except Exception:
             pass
         # элементы, которые прячутся в режиме «Просто» (значения при этом сохраняются и продолжают действовать)
-        self._adv_items = [(f, self.sp_gamma), (f, self.sp_sat), (f, row_blur), (f, row_hz),
+        self._adv_items = [(f, self.sp_gamma), (f, self.sp_sat), (f, self.sp_wb), (f, self.sp_wbtint),
+                           (f, row_blur), (f, row_hz),
                            (f, self.cmb_target), (f, self.sp_cam), (f, self.sp_refl), (f, self.sp_refr),
                            (fs, self.sp_size), (fs, self.sp_dist), (fs, self.sp_icon),
                            (self._fk, self.lbl_sky_target), (self._fk, self.sp_sky_cam),
@@ -8413,8 +8459,10 @@ class SafeEnvironment(QtWidgets.QWidget):
             ev, gm, sat = cc_read(cc) if cc is not None else (0.0, 1.0, 100.0)
             ev -= self._corr_ev(str(bm.filename))      # в истории — Exposure пользователя, без поправки
             tg = self.lib.channel_target
+            wbk, wbt = cc_read_wb(cc)
             st["hdri"] = dict(path=str(bm.filename), rotation=float(bm.uAngle), exposure=ev, gamma=gm,
-                              saturation=sat, blur=float(bm.filteringBlur), horizon=bm_horizon(bm),
+                              saturation=sat, wb_temp=wbk, wb_tint=wbt,
+                              blur=float(bm.filteringBlur), horizon=bm_horizon(bm),
                               cam_ev=channel_ev(tg, *CHANNELS[0]), refl_ev=channel_ev(tg, *CHANNELS[1]),
                               refr_ev=channel_ev(tg, *CHANNELS[2]))
         s = find_sun()
@@ -8556,7 +8604,8 @@ class SafeEnvironment(QtWidgets.QWidget):
                     else:
                         ok = False
                     self._write_hdri(h["rotation"], h["exposure"], h["gamma"], h["saturation"], h["blur"],
-                                     h["horizon"], h["cam_ev"], h["refl_ev"], h["refr_ev"])
+                                     h["horizon"], h["cam_ev"], h["refl_ev"], h["refr_ev"],
+                                     wb_temp=h.get("wb_temp", WB_NEUTRAL), wb_tint=h.get("wb_tint", 0.0))
                 sun = st.get("sun")
                 if sun is None:
                     delete_sun_objects()
@@ -8759,6 +8808,7 @@ class SafeEnvironment(QtWidgets.QWidget):
     def _hdri_values(self):
         return dict(rotation=self.sp_rot.value(), exposure=self.sp_exp.value(),
                     gamma=self.sp_gamma.value(), saturation=self.sp_sat.value(),
+                    wb_temp=self.sp_wb.value(), wb_tint=self.sp_wbtint.value(),
                     blur=self.sp_blur.value(), horizon=self.sp_horizon.value(),
                     cam_ev=self.sp_cam.value(), refl_ev=self.sp_refl.value(), refr_ev=self.sp_refr.value())
 
@@ -8771,7 +8821,7 @@ class SafeEnvironment(QtWidgets.QWidget):
         return float(off) if off is not None else 0.0
 
     def _write_hdri(self, rotation, exposure, gamma, saturation, blur=BLUR_DEFAULT, horizon=0.0,
-                    cam_ev=0.0, refl_ev=0.0, refr_ev=0.0, replace=()):
+                    cam_ev=0.0, refl_ev=0.0, refr_ev=0.0, replace=(), wb_temp=WB_NEUTRAL, wb_tint=0.0):
         adopt_legacy()
         _cc, bm, _o = get_chain()
         if bm is None:
@@ -8781,6 +8831,7 @@ class SafeEnvironment(QtWidgets.QWidget):
         bm.filteringBlur = min(BLUR_MAX, max(BLUR_MIN, float(blur)))
         bm_set_horizon(bm, max(HORIZON_MIN, min(HORIZON_MAX, float(horizon))))
         cc_write(cc, float(exposure) + self._corr_ev(str(bm.filename)), gamma, saturation)   # Exposure в окне + поправка яркости карты; 100 % = норма
+        cc_write_wb(cc, wb_temp, wb_tint)
         kind = self.lib.channel_target
         clear_channels(keep_kind=kind)            # в другом месте наших карт не остаётся
         skipped = []
@@ -8969,7 +9020,7 @@ class SafeEnvironment(QtWidgets.QWidget):
     @undoable("HDRI settings reset")
     def reset_hdri_settings(self):
         vals = dict(rotation=0.0, exposure=0.0, gamma=1.0, saturation=100.0, blur=BLUR_DEFAULT,
-                    horizon=0.0, cam_ev=0.0, refl_ev=0.0, refr_ev=0.0)
+                    horizon=0.0, cam_ev=0.0, refl_ev=0.0, refr_ev=0.0, wb_temp=WB_NEUTRAL, wb_tint=0.0)
         if self._run("reset HDRI", lambda: self._write_hdri(**vals)) is False:
             self._status("Apply the HDRI first.")
             return
@@ -9029,6 +9080,8 @@ class SafeEnvironment(QtWidgets.QWidget):
             self.sp_exp.setValue(0.0)
             self.sp_gamma.setValue(1.0)
             self.sp_sat.setValue(100.0)
+            self.sp_wb.setValue(WB_NEUTRAL)
+            self.sp_wbtint.setValue(0.0)
             self.sp_blur.setValue(BLUR_DEFAULT)
             self.sp_horizon.setValue(0.0)
             self.sp_cam.setValue(0.0)
@@ -9585,7 +9638,8 @@ class SafeEnvironment(QtWidgets.QWidget):
             vals = dict(rotation=p.get("rotation", 0.0), exposure=p.get("exposure", 0.0),
                         gamma=p.get("gamma", 1.0), saturation=sat, blur=p.get("blur", BLUR_DEFAULT),
                         horizon=p.get("horizon", 0.0), cam_ev=p.get("cam_ev", 0.0),
-                        refl_ev=p.get("refl_ev", 0.0), refr_ev=p.get("refr_ev", 0.0))
+                        refl_ev=p.get("refl_ev", 0.0), refr_ev=p.get("refr_ev", 0.0),
+                        wb_temp=p.get("wb_temp", WB_NEUTRAL), wb_tint=p.get("wb_tint", 0.0))
             if self._run("preset HDRI", lambda: self._write_hdri(**vals)) is False:
                 notes.append("HDRI settings not applied (no HDRI)")
         sun = p.get("sun")
@@ -9708,6 +9762,9 @@ class SafeEnvironment(QtWidgets.QWidget):
                     self.sp_exp.setValue(round(ev_ - self._corr_ev(path), 2))   # поправка яркости живёт под капотом
                     self.sp_gamma.setValue(g_)
                     self.sp_sat.setValue(min(200.0, sat_))
+                    wbk, wbt = cc_read_wb(cc)
+                    self.sp_wb.setValue(wbk)
+                    self.sp_wbtint.setValue(wbt)
             elif other:
                 self.lbl_current.setText("A different map is in the Single map slot")
             else:
